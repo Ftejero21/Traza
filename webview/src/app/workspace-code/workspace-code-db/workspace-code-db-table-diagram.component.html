@@ -1,0 +1,182 @@
+<div class="wtd" [class.wtd--compact]="compact" [class.wtd--explaining]="explaining" [style.--xs]="xSpeed">
+  <div class="wtd-toolbar" *ngIf="!compact">
+    <span class="wtd-legend" aria-hidden="true">
+      <span><i class="bi bi-key-fill is-pk"></i> PK</span>
+      <span><i class="bi bi-link-45deg is-fk"></i> FK</span>
+    </span>
+    <span class="wdx-chip wdx-chip--info" *ngIf="table && !schemaMode">{{ 'dbw.tdiag.summary' | wcT: summaryParams }}</span>
+    <span class="wdx-chip wdx-chip--info" *ngIf="table && schemaMode">{{ 'aiFlow.db.tables' | wcT: { n: schemaCount } }}</span>
+    <span class="wdx-chip" *ngIf="loading && table"><i class="bi bi-arrow-repeat wdx-spin"></i>{{ 'database.loading' | wcT }}</span>
+    <span class="wtd-zoomgroup" *ngIf="table">
+      <button type="button" class="wdx-btn wdx-btn--icon" (click)="zoomBy(1 / 1.2)" [title]="'dbw.diagram.zoomOut' | wcT" [attr.aria-label]="'dbw.diagram.zoomOut' | wcT"><i class="bi bi-dash-lg"></i></button>
+      <button type="button" class="wdx-btn wtd-zoom" (click)="resetZoom()" [title]="'dbw.diagram.zoomReset' | wcT">{{ zoomLabel }}</button>
+      <button type="button" class="wdx-btn wdx-btn--icon" (click)="zoomBy(1.2)" [title]="'dbw.diagram.zoomIn' | wcT" [attr.aria-label]="'dbw.diagram.zoomIn' | wcT"><i class="bi bi-plus-lg"></i></button>
+      <button type="button" class="wdx-btn wdx-btn--icon" (click)="fit()" [title]="'dbw.diagram.fit' | wcT" [attr.aria-label]="'dbw.diagram.fit' | wcT"><i class="bi bi-arrows-fullscreen"></i></button>
+      <button type="button" class="wdx-btn wdx-btn--icon" [class.is-active]="expandedAll" (click)="toggleExpandAll()" [title]="'dbw.diagram.allColumns' | wcT" [attr.aria-label]="'dbw.diagram.allColumns' | wcT" [attr.aria-pressed]="expandedAll"><i class="bi bi-list-nested"></i></button>
+      <button type="button" class="wdx-btn wdx-btn--icon" [disabled]="!hasCustomLayout" (click)="resetLayout()" [title]="'dbw.tdiag.resetLayout' | wcT" [attr.aria-label]="'dbw.tdiag.resetLayout' | wcT"><i class="bi bi-arrow-counterclockwise"></i></button>
+      <button type="button" class="wdx-btn wtd-explainbtn" [class.is-active]="userExplaining" (click)="startExplain(explainTableName)" [title]="'dbw.tdiag.menu.explain' | wcT"><i class="bi bi-magic"></i>{{ 'dbw.tdiag.explainBtn' | wcT }}</button>
+    </span>
+  </div>
+
+  <p class="wdx-notice wdx-notice--bad wtd-notice" *ngIf="error" role="alert"><i class="bi bi-exclamation-circle"></i><span>{{ error }}</span></p>
+
+  <p class="wdx-notice wdx-notice--bad wtd-notice" *ngIf="actionError" role="alert"><i class="bi bi-exclamation-circle"></i><span>{{ actionError }}</span></p>
+
+  <div class="wtd-skeleton" *ngIf="!table && loading" aria-hidden="true">
+    <div class="wdx-skeleton wtd-sk wtd-sk--side"></div>
+    <div class="wdx-skeleton wtd-sk wtd-sk--link"></div>
+    <div class="wdx-skeleton wtd-sk wtd-sk--center"></div>
+    <div class="wdx-skeleton wtd-sk wtd-sk--link"></div>
+    <div class="wdx-skeleton wtd-sk wtd-sk--side"></div>
+  </div>
+
+  <div class="wdx-empty" *ngIf="!table && !loading">
+    <i class="bi bi-table"></i>
+    <strong>{{ 'dbw.tableMissing' | wcT }}</strong>
+    <span>{{ tableName }}</span>
+  </div>
+
+  <div class="wtd-none" *ngIf="table && !edges.length && !schemaMode">
+    <p class="wdx-notice"><i class="bi bi-info-circle"></i><span>{{ 'dbw.tdiag.none' | wcT }}</span></p>
+  </div>
+
+  <div class="wtd-body" *ngIf="table">
+    <div #canvas class="wtd-canvas" [class.is-grabbing]="grabbing" [ngStyle]="gridStyle" [style.height.px]="compact ? compactHeight : null" role="application" [attr.aria-label]="'dbw.tdiag.aria' | wcT">
+    <div class="wtd-world" [style.transform]="worldTransform">
+    <div class="wtd-stage" [style.width.px]="width" [style.height.px]="height">
+      <span class="wtd-caption" *ngIf="hasLeft && !hasCustomLayout" [style.left.px]="xLeft" [style.top.px]="stagePad" [style.width.px]="nodeWidth">{{ 'dbw.rel.incoming' | wcT }}</span>
+      <span class="wtd-caption" *ngIf="hasRight && !hasCustomLayout" [style.left.px]="xRight" [style.top.px]="stagePad" [style.width.px]="nodeWidth">{{ 'dbw.tdiag.outgoing' | wcT }}</span>
+
+      <svg class="wtd-svg" [attr.width]="width" [attr.height]="height" aria-hidden="true">
+        <defs>
+          <marker [attr.id]="uid + '-a'" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 1 L 9 5 L 0 9 z" class="wtd-arrow" /></marker>
+          <marker [attr.id]="uid + '-ah'" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M 0 1 L 9 5 L 0 9 z" class="wtd-arrow wtd-arrow--hot" /></marker>
+          <marker [attr.id]="uid + '-d'" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7"><circle cx="5" cy="5" r="3.2" class="wtd-dotmark" /></marker>
+        </defs>
+        <g *ngFor="let e of edges; trackBy: trackEdge" class="wtd-edge" [class.is-hot]="isEdgeHot(e)" [class.is-selected]="selectedEdge === e.id" [class.is-dim]="isEdgeDim(e)"
+          [class.is-xflow]="explaining && xActiveEdge === e.id" [class.is-xdim]="explaining && !xEdgeInvolved(e)"
+          [style.--d]="e.delay + 'ms'" (mouseenter)="hoverEdge = e.id" (mouseleave)="hoverEdge = null">
+          <path class="wtd-edge__base" pathLength="100" [attr.d]="e.path" [attr.marker-end]="'url(#' + uid + (isEdgeHot(e) || (explaining && xActiveEdge === e.id) ? '-ah' : '-a') + ')'" [attr.marker-start]="'url(#' + uid + '-d)'" />
+          <path class="wtd-edge__pulse" pathLength="100" [attr.d]="e.path" />
+          <path class="wtd-edge__hit" [attr.d]="e.path" (click)="selectEdge(e, $event)"><title>{{ e.title }}</title></path>
+        </g>
+        <ng-container *ngIf="explain && xFlow as f">
+          <ng-container *ngIf="!f.edgeId">
+            <path *ngFor="let k of [explain.player.stepKey]" class="wtd-xpath" pathLength="100" [attr.d]="f.d" [attr.marker-end]="'url(#' + uid + '-ah)'" />
+          </ng-container>
+        </ng-container>
+      </svg>
+
+      <div *ngFor="let n of nodes; trackBy: trackNode" class="wtd-node" [ngClass]="'wtd-node--' + n.side" [attr.data-table]="n.name" [class.is-hot]="hoverNode === n.name"
+        [class.is-dragging]="dragging === n.name" [class.is-xdim]="explaining && !xInvolved(n.name)" [class.is-xfocus]="explaining && xInvolved(n.name)"
+        [class.is-xactive]="explaining && xActive(n.name)" [class.is-xinsert]="xInsertActive && xIsTarget(n.name)"
+        [style.left.px]="n.x" [style.top.px]="n.y" [style.width.px]="nodeWidth" [style.height.px]="n.h" [style.--d]="n.delay + 'ms'"
+        (mouseenter)="hoverNode = n.name" (mouseleave)="hoverNode = null">
+        <div class="wtd-node__head" [style.height.px]="headHeight" [class.is-link]="isLink(n)"
+          [attr.role]="isLink(n) ? 'button' : null" tabindex="0" [title]="n.name">
+          <i class="bi" [ngClass]="n.table.type === 'VIEW' ? 'bi-eye' : 'bi-table'"></i>
+          <span class="wtd-node__name">{{ n.name }}</span>
+          <span class="wtd-node__plus" *ngIf="xInsertActive && xIsTarget(n.name)">+1</span>
+          <span class="wtd-node__count">{{ n.table.columns.length }}</span>
+        </div>
+        <div class="wtd-node__fns" *ngIf="n.fns.length" [style.height.px]="n.fnH" [title]="n.fns.join(', ')">
+          <code class="wtd-node__fn" *ngFor="let f of n.fns">{{ f }}</code>
+        </div>
+        <div *ngFor="let c of n.rows; trackBy: trackColumn" class="wtd-row" [style.height.px]="rowHeight" [class.is-linked]="n.linked.has(c.name)" [class.is-hot]="isHot(n, c.name)" [class.is-xfill]="!!xValueOf(n, c.name)" [class.is-xtouch]="xTouched(n, c.name)">
+          <i class="bi wtd-row__icon" [ngClass]="c.primaryKey ? 'bi-key-fill is-pk' : isFk(n, c) ? 'bi-link-45deg is-fk' : 'bi-dot'"></i>
+          <span class="wtd-row__name" [title]="rowTitle(n, c)">{{ c.name }}</span>
+          <span class="wtd-row__val" *ngIf="xValueOf(n, c.name) as v" [title]="v">{{ v }}</span>
+          <span class="wtd-row__type" *ngIf="!xValueOf(n, c.name)">{{ typeOf(c) }}</span>
+        </div>
+        <div class="wtd-more" *ngIf="n.hidden" [style.height.px]="22">{{ 'dbw.diagram.more' | wcT: { count: n.hidden } }}</div>
+      </div>
+
+      <div class="wtd-xactor" *ngFor="let a of xActors; trackBy: trackActor" [class.is-active]="a.active" [class.is-fn]="a.fn" [attr.title]="a.title || null"
+        [style.left.px]="a.x" [style.top.px]="a.y" [style.width.px]="a.w" [style.height.px]="a.h">
+        <i class="bi" [ngClass]="a.icon"></i><span>{{ a.label }}</span>
+      </div>
+
+      <ng-container *ngIf="explain && xFlow as f">
+        <div class="wtd-xpacket" *ngFor="let k of [explain.player.stepKey]" [class.is-reverse]="f.reverse" [style.offset-path]="f.css" aria-hidden="true">
+          <i class="bi" [ngClass]="explain.player.step?.icon || 'bi-box-seam'"></i>
+        </div>
+      </ng-container>
+    </div>
+    </div>
+
+    <div class="wtd-zoombar" *ngIf="compact" [title]="'dbw.tdiag.zoomHint' | wcT">
+      <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--sm" (click)="zoomBy(1 / 1.2)" [title]="'dbw.diagram.zoomOut' | wcT" [attr.aria-label]="'dbw.diagram.zoomOut' | wcT"><i class="bi bi-dash-lg"></i></button>
+      <button type="button" class="wdx-btn wdx-btn--sm wtd-zoom" (click)="resetZoom()" [title]="'dbw.diagram.zoomReset' | wcT">{{ zoomLabel }}</button>
+      <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--sm" (click)="zoomBy(1.2)" [title]="'dbw.diagram.zoomIn' | wcT" [attr.aria-label]="'dbw.diagram.zoomIn' | wcT"><i class="bi bi-plus-lg"></i></button>
+      <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--sm" (click)="fit()" [title]="'dbw.diagram.fit' | wcT" [attr.aria-label]="'dbw.diagram.fit' | wcT"><i class="bi bi-arrows-fullscreen"></i></button>
+      <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--sm" [disabled]="!hasCustomLayout" (click)="resetLayout()" [title]="'dbw.tdiag.resetLayout' | wcT" [attr.aria-label]="'dbw.tdiag.resetLayout' | wcT"><i class="bi bi-arrow-counterclockwise"></i></button>
+    </div>
+    </div>
+
+    <aside class="wtd-pop" *ngIf="selectedRelation as r" [ngStyle]="popStyle" role="dialog" [attr.aria-label]="'dbw.rel.title' | wcT">
+      <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--sm wdx-btn--ghost wtd-pop__close" [attr.aria-label]="'common.cancel' | wcT" (click)="closeRelation()"><i class="bi bi-x-lg"></i></button>
+      <h3 class="wtd-pop__title"><i class="bi bi-diagram-2"></i><span>{{ 'dbw.rel.title' | wcT }}</span></h3>
+      <p class="wtd-pop__explain">{{ explainKey(r) | wcT: explainParams(r) }}</p>
+      <dl class="wtd-pop__dl">
+        <dt>{{ 'dbw.dlg.relation.source' | wcT }}</dt><dd class="wdx-mono">{{ r.src }}.{{ r.srcCols.join(', ') }}</dd>
+        <dt>{{ 'dbw.dlg.relation.target' | wcT }}</dt><dd class="wdx-mono">{{ r.dst }}.{{ r.dstCols.join(', ') }}</dd>
+        <dt>{{ 'dbw.rel.kind' | wcT }}</dt><dd>{{ cardinalityKey(r) | wcT }}</dd>
+        <dt>ON DELETE</dt><dd class="wdx-mono">{{ r.onDelete || '—' }}</dd>
+        <dt>ON UPDATE</dt><dd class="wdx-mono">{{ r.onUpdate || '—' }}</dd>
+        <dt>{{ 'dbw.dlg.relation.name' | wcT }}</dt><dd class="wdx-mono">{{ r.name }}</dd>
+      </dl>
+    </aside>
+
+    <!-- Modo «Explicar»: capa de pantalla (tamaño constante, no escala con el zoom). -->
+    <ng-container *ngIf="explain as ex">
+      <div class="wtd-xhead" [class.is-driven]="ex.driven">
+        <strong class="wtd-xhead__title" *ngIf="!ex.driven"><i class="bi bi-magic"></i>{{ 'dbw.explain.title' | wcT: { table: ex.table } }}</strong>
+        <strong class="wtd-xhead__title" *ngIf="ex.driven"><i class="bi bi-database"></i>{{ 'aiFlow.db.headTitle' | wcT: { title: ex.script.title || '' } }}</strong>
+        <span class="wtd-xhead__sum" *ngIf="ex.script.summary"><ng-container *ngFor="let p of textParts(ex.script.summary)"><code *ngIf="p.code">{{ p.t }}</code><ng-container *ngIf="!p.code">{{ p.t }}</ng-container></ng-container></span>
+        <span class="wdx-chip" *ngIf="!ex.driven" [class.wdx-chip--info]="ex.script.source === 'ai'"><i class="bi" [ngClass]="ex.script.source === 'ai' ? 'bi-stars' : 'bi-diagram-3'"></i>{{ (ex.script.source === 'ai' ? 'dbw.explain.sourceAi' : 'dbw.explain.sourceLocal') | wcT }}</span>
+        <span class="wdx-chip wdx-chip--info" *ngIf="ex.driven && ex.script.note"><i class="bi bi-database"></i>{{ ex.script.note }}</span>
+      </div>
+
+      <ng-container *ngIf="ex.player.step as st">
+        <ng-container *ngFor="let k of [ex.player.stepKey]">
+          <div class="wtd-xballoon" #xballoon *ngIf="xBalloon as b" [ngStyle]="b.style" [ngClass]="'is-' + b.placement" role="status" aria-live="polite">
+            <span class="wtd-xballoon__num">{{ ex.player.index + 1 }}</span>
+            <div class="wtd-xballoon__body">
+              <span class="wtd-xballoon__meta" *ngIf="st.op || st.fn">
+                <span class="wtd-xballoon__op" *ngIf="st.op" [attr.data-op]="st.op">{{ st.op }}</span>
+                <code class="wtd-xballoon__fn" *ngIf="st.fn">{{ st.fn }}()</code>
+              </span>
+              <strong class="wtd-xballoon__title"><ng-container *ngFor="let p of textParts(st.title)"><code *ngIf="p.code">{{ p.t }}</code><ng-container *ngIf="!p.code">{{ p.t }}</ng-container></ng-container></strong>
+              <span class="wtd-xballoon__text"><ng-container *ngFor="let p of textParts(st.text)"><code *ngIf="p.code">{{ p.t }}</code><ng-container *ngIf="!p.code">{{ p.t }}</ng-container></ng-container></span>
+              <span class="wtd-xballoon__cols" *ngIf="ex.driven && st.columns.length"><code *ngFor="let c of st.columns">{{ c }}<ng-container *ngIf="st.values?.[c] as v"> ← {{ v }}</ng-container></code></span>
+              <span class="wtd-xballoon__ep" *ngIf="st.endpoint"><code>{{ st.endpoint }}</code><em *ngIf="st.endpointGuess">({{ 'dbw.explain.example' | wcT }})</em></span>
+            </div>
+          </div>
+        </ng-container>
+      </ng-container>
+
+      <div class="wtd-xbar" *ngIf="!ex.driven" role="toolbar" [attr.aria-label]="'dbw.explain.aria' | wcT: { table: ex.table }">
+        <span class="wtd-xbar__step">{{ 'dbw.explain.step' | wcT: { n: ex.player.index + 1, total: ex.player.count } }}</span>
+        <span class="wtd-xdots">
+          <button type="button" *ngFor="let s of ex.script.steps; let i = index" [class.is-active]="i === ex.player.index" [class.is-done]="i < ex.player.index"
+            [attr.aria-label]="('dbw.explain.step' | wcT: { n: i + 1, total: ex.player.count }) + ': ' + s.title" [attr.aria-current]="i === ex.player.index ? 'step' : null" (click)="ex.player.go(i)"></button>
+        </span>
+        <button type="button" class="wdx-btn wdx-btn--icon" [disabled]="ex.player.atStart" (click)="ex.player.prev()" [title]="'dbw.explain.prev' | wcT" [attr.aria-label]="'dbw.explain.prev' | wcT"><i class="bi bi-skip-backward-fill"></i></button>
+        <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--primary" data-x="play" (click)="ex.player.toggle()"
+          [title]="(ex.player.playing ? 'dbw.explain.pause' : 'dbw.explain.play') | wcT" [attr.aria-label]="(ex.player.playing ? 'dbw.explain.pause' : 'dbw.explain.play') | wcT">
+          <i class="bi" [ngClass]="ex.player.playing ? 'bi-pause-fill' : ex.player.finished ? 'bi-arrow-repeat' : 'bi-play-fill'"></i>
+        </button>
+        <button type="button" class="wdx-btn wdx-btn--icon" [disabled]="ex.player.atEnd" (click)="ex.player.next()" [title]="'dbw.explain.next' | wcT" [attr.aria-label]="'dbw.explain.next' | wcT"><i class="bi bi-skip-forward-fill"></i></button>
+        <button type="button" class="wdx-btn wdx-btn--icon" (click)="ex.player.restart()" [title]="'dbw.explain.restart' | wcT" [attr.aria-label]="'dbw.explain.restart' | wcT"><i class="bi bi-arrow-counterclockwise"></i></button>
+        <select #sp class="wdx-input wtd-xbar__speed" (change)="setSpeed(sp.value)" [title]="'dbw.explain.speed' | wcT" [attr.aria-label]="'dbw.explain.speed' | wcT">
+          <option *ngFor="let s of speeds" [value]="s" [selected]="s === ex.player.speed">{{ s }}×</option>
+        </select>
+        <button type="button" class="wdx-btn" *ngIf="ex.script.source === 'local'" [disabled]="ex.ai === 'loading'" (click)="improveExplain()"><i class="bi bi-stars"></i>{{ 'dbw.explain.ai' | wcT }}</button>
+        <span class="wdx-chip wdx-chip--busy" *ngIf="ex.ai === 'loading'" role="status"><i class="bi bi-arrow-repeat wdx-spin"></i>{{ 'dbw.explain.aiLoading' | wcT }}</span>
+        <p class="wdx-notice wdx-notice--bad wtd-xbar__error" *ngIf="ex.ai === 'error' && ex.aiError" role="alert"><i class="bi bi-exclamation-circle"></i><span>{{ 'dbw.explain.aiError' | wcT: { message: ex.aiError } }}</span></p>
+        <button type="button" class="wdx-btn wdx-btn--icon" (click)="exitExplain()" [title]="'dbw.explain.exit' | wcT" [attr.aria-label]="'dbw.explain.exit' | wcT"><i class="bi bi-x-lg"></i></button>
+        <span class="wdx-hint wtd-xbar__keys">{{ 'dbw.explain.keys' | wcT }}</span>
+      </div>
+    </ng-container>
+  </div>
+</div>

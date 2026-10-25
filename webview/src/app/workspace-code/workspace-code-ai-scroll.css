@@ -1,0 +1,13 @@
+/* Scroll común de Nexo IA: barra en píldora de 8px (panel, chat, diagrama, resultados, diffs, fragmentos y áreas de texto). */
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; background-color: var(--wce-scroll); }
+*::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--wce-scroll) 160%, transparent); }
+*::-webkit-scrollbar-track, *::-webkit-scrollbar-corner { background: transparent; }
+:host::-webkit-scrollbar { width: 8px; height: 8px; }
+:host::-webkit-scrollbar-thumb { border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; background-color: var(--wce-scroll); }
+:host::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--wce-scroll) 160%, transparent); }
+:host::-webkit-scrollbar-track, :host::-webkit-scrollbar-corner { background: transparent; }
+
+@supports not selector(::-webkit-scrollbar) {
+  * { scrollbar-width: thin; scrollbar-color: var(--wce-scroll) transparent; }
+}

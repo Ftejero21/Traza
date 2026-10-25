@@ -1,0 +1,5 @@
+node_modules
+dist
+webview/node_modules
+webview/.angular
+*.vsix

@@ -1,0 +1,266 @@
+{
+  "name": "nexo-vscode",
+  "displayName": "Nexo Flujo",
+  "description": "Visualización del flujo de un proceso del proyecto (diagrama de secuencia, simular datos, analizar logs y proponer cambios) con el modelo de lenguaje que ya usas en VS Code. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.",
+  "publisher": "nexo-local",
+  "version": "0.1.0",
+  "private": true,
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ftejero21/nexo-vscode.git"
+  },
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onChatParticipant:nexo.flow",
+    "onLanguageModelTool:nexo_flow"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "nexo.openFlow",
+        "title": "Nexo: Flujo",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "nexo.openSampleFlow",
+        "title": "Nexo: Abrir flujo de ejemplo"
+      },
+      {
+        "command": "nexo.generateFlow",
+        "title": "Nexo: Generar flujo",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "nexo.proposeChange",
+        "title": "Nexo: Proponer cambio"
+      },
+      {
+        "command": "nexo.selectModel",
+        "title": "Nexo: Elegir modelo"
+      },
+      {
+        "command": "nexo.showLastFlow",
+        "title": "Nexo: Mostrar último flujo generado"
+      },
+      {
+        "command": "nexo.addDatabase",
+        "title": "Nexo: Añadir conexión de base de datos"
+      },
+      {
+        "command": "nexo.setDatabasePassword",
+        "title": "Nexo: Contraseña de base de datos"
+      },
+      {
+        "command": "nexo.testDatabase",
+        "title": "Nexo: Probar conexión de base de datos"
+      },
+      {
+        "command": "nexo.removeDatabase",
+        "title": "Nexo: Quitar conexión de base de datos"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "nexo.openFlow",
+          "when": "resourceFilename =~ /\\.flow\\.json$/",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "nexo.generateFlow",
+          "when": "editorTextFocus",
+          "group": "nexo"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Nexo",
+      "properties": {
+        "nexo.model": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": false,
+          "properties": {
+            "vendor": {
+              "type": "string"
+            },
+            "family": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "markdownDescription": "Modelo de VS Code (Copilot, Claude, GPT, BYOK…) que usa Nexo; vacío = elegir al usarlo. Usa **Nexo: Elegir modelo**. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo."
+        },
+        "nexo.language": {
+          "type": "string",
+          "enum": [
+            "es",
+            "en"
+          ],
+          "default": "es",
+          "description": "Idioma de la vista de flujo y de las respuestas de la IA."
+        },
+        "nexo.databases": {
+          "type": "array",
+          "default": [],
+          "description": "Conexiones de base de datos para el modo «Base de datos» de la vista de flujo (solo se lee la metadata, en solo lectura). La contraseña NO va aquí: se guarda en el almacén seguro de VS Code con \"Nexo: Contraseña de base de datos\".",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "name",
+              "provider",
+              "host",
+              "port",
+              "database",
+              "user"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,40}$",
+                "description": "Identificador único de la conexión."
+              },
+              "name": {
+                "type": "string",
+                "description": "Nombre visible."
+              },
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "postgresql",
+                  "mysql",
+                  "mariadb"
+                ],
+                "description": "Proveedor de base de datos."
+              },
+              "host": {
+                "type": "string",
+                "description": "Servidor (sin TLS solo se permite localhost)."
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "description": "Puerto."
+              },
+              "database": {
+                "type": "string",
+                "description": "Base de datos."
+              },
+              "user": {
+                "type": "string",
+                "description": "Usuario (se recomienda uno de solo lectura)."
+              },
+              "schema": {
+                "type": "string",
+                "default": "public",
+                "description": "Esquema (solo PostgreSQL)."
+              },
+              "root": {
+                "type": "string",
+                "default": "",
+                "description": "Carpeta del proyecto que usa esta base de datos (relativa al workspace; vacío = todas)."
+              },
+              "ssl": {
+                "type": "boolean",
+                "default": false,
+                "description": "Conexión TLS verificando el certificado (obligatoria para servidores remotos)."
+              }
+            }
+          }
+        }
+      }
+    },
+    "languageModelTools": [
+      {
+        "name": "nexo_flow",
+        "toolReferenceName": "nexoFlujo",
+        "canBeReferencedInPrompt": true,
+        "displayName": "Nexo: Flujo de un proceso",
+        "userDescription": "Genera y abre el diagrama de flujo de un proceso del proyecto (login, registro, un endpoint…).",
+        "modelDescription": "Use this tool when the user asks how a process, feature, flow or endpoint of the currently open project works (e.g. login, sign-up, payment, 'what does POST /api/x do'). It reads the relevant local source code, generates a validated sequence diagram (steps source -> target with file:line references), opens it in a VS Code panel and returns the steps as text. It does not modify any file. 'files' is an optional hint with workspace paths to look at first.",
+        "icon": "$(type-hierarchy-sub)",
+        "tags": [
+          "nexo",
+          "flow",
+          "architecture"
+        ],
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "question": {
+              "type": "string",
+              "description": "The process, feature or endpoint the user wants to understand, in the user's words.",
+              "maxLength": 4000
+            },
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 520
+              },
+              "maxItems": 12,
+              "description": "Rutas del workspace (relativas o absolutas) que se usan como pista"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "additionalProperties": false
+        }
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "nexo.flow",
+        "name": "nexo",
+        "fullName": "Nexo Flujo",
+        "description": "Genera el flujo de un proceso del proyecto",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "flujo",
+            "description": "Generar diagrama de flujo"
+          },
+          {
+            "name": "cambio",
+            "description": "Proponer un cambio sobre el flujo abierto"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "build:webview": "npm --prefix webview run build",
+    "build:host": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap --external:pg-native --external:pg-cloudflare",
+    "build": "npm run build:webview && npm run build:host",
+    "watch:host": "npm run build:host -- --watch",
+    "serve:webview": "npm --prefix webview start",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "mysql2": "^3.9.7",
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/pg": "^8.11.6",
+    "@types/vscode": "~1.95.0",
+    "esbuild": "^0.20.2",
+    "typescript": "~5.4.2"
+  }
+}

@@ -1,0 +1,72 @@
+/*
+ * Tema de la vista de flujo: las variables `--wce-*` del editor de chatFront se mapean a los tokens del tema activo de
+ * VS Code (`--vscode-*`). Fuera de VS Code (navegador) se usan los valores originales del tema Nexo Oscuro.
+ */
+:root {
+  --wce-bg: var(--vscode-editor-background, #0d1220);
+  --wce-editor-bg: var(--vscode-editor-background, #0d1220);
+  --wce-surface: var(--vscode-sideBar-background, #10162a);
+  --wce-surface-2: var(--vscode-editorWidget-background, #151c33);
+  --wce-input: var(--vscode-input-background, #0a0f1c);
+  --wce-border: var(--vscode-panel-border, rgba(148, 163, 216, 0.11));
+  --wce-border-strong: var(--vscode-widget-border, rgba(148, 163, 216, 0.2));
+  --wce-hover: var(--vscode-list-hoverBackground, rgba(148, 163, 216, 0.09));
+  --wce-raised: rgba(255, 255, 255, 0.03);
+  --wce-text: var(--vscode-foreground, #e6e9f5);
+  --wce-text-strong: var(--vscode-editor-foreground, #fff);
+  --wce-text-soft: color-mix(in srgb, var(--vscode-foreground, #e6e9f5) 80%, transparent);
+  --wce-muted: var(--vscode-descriptionForeground, #8b93ad);
+  --wce-faint: var(--vscode-disabledForeground, #5d6684);
+  --wce-scroll: var(--vscode-scrollbarSlider-background, rgba(120, 132, 180, 0.3));
+  --wce-accent: var(--vscode-button-background, #6366f1);
+  --wce-hover-strong: var(--vscode-list-activeSelectionBackground, rgba(255, 255, 255, 0.16));
+  --wce-overlay: var(--vscode-widget-shadow, rgba(5, 8, 16, 0.62));
+  --wce-shadow: var(--vscode-widget-shadow, rgba(0, 0, 0, 0.55));
+  --wce-accent-2: var(--vscode-charts-purple, #a855f7);
+  --wce-accent-text: var(--vscode-textLink-foreground, #c7d2fe);
+  --wce-accent-soft: color-mix(in srgb, var(--wce-accent) 20%, transparent);
+  --wce-accent-strong: color-mix(in srgb, var(--wce-accent) 42%, transparent);
+  --wce-on-accent: var(--vscode-button-foreground, #fff);
+  --wce-danger: var(--vscode-charts-red, #f87171);
+  --wce-danger-text: var(--vscode-errorForeground, #fca5a5);
+  --wce-danger-soft: color-mix(in srgb, var(--wce-danger) 18%, transparent);
+  --wce-danger-border: color-mix(in srgb, var(--wce-danger) 45%, transparent);
+  --wce-success: var(--vscode-charts-green, #4ade80);
+  --wce-success-text: #86efac;
+  --wce-success-soft: color-mix(in srgb, var(--wce-success) 20%, transparent);
+  --wce-success-border: color-mix(in srgb, var(--wce-success) 40%, transparent);
+  --wce-warning: var(--vscode-charts-yellow, #fbbf24);
+  --wce-warning-text: var(--vscode-editorWarning-foreground, #fde68a);
+  --wce-warning-soft: color-mix(in srgb, var(--wce-warning) 18%, transparent);
+  --wce-warning-border: color-mix(in srgb, var(--wce-warning) 40%, transparent);
+  --wce-syn-keyword: var(--vscode-symbolIcon-keywordForeground, #c792ea);
+  --wce-syn-string: var(--vscode-debugTokenExpression-string, #c3e88d);
+  --wce-syn-type: var(--vscode-symbolIcon-classForeground, #ffcb6b);
+  --wce-syn-function: var(--vscode-symbolIcon-functionForeground, #82aaff);
+  --wce-syn-number: var(--vscode-debugTokenExpression-number, #f78c6c);
+  --wce-syn-comment: var(--vscode-disabledForeground, #5d6684);
+  --wce-mono: var(--vscode-editor-font-family, monospace);
+  --wce-pad: 1;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
+  font-size: 13px;
+  color: var(--wce-text);
+  background: var(--wce-editor-bg);
+}
+
+button, input, textarea, select {
+  font-family: inherit;
+}

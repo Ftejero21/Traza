@@ -1,0 +1,718 @@
+import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { Subscription } from 'rxjs';
+import {
+  CodeRef,
+  FlowDbAccess,
+  FlowDiagram,
+  FlowLane,
+  FlowLaneKind,
+  FlowMode,
+  FlowRowState,
+  FlowStep,
+  LogAnalysisResult,
+  LogEvidence,
+  ResultKind,
+  SimulationResult,
+} from '../ai/nexo-ia.types';
+import { FlowStatusPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
+import { UiScreenView, WorkspaceCodeAiUiPreviewService } from '../services/workspace-code-ai-ui-preview.service';
+import { WorkspaceCodeNotifyService } from '../services/workspace-code-notify.service';
+import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
+import { NexoBridge } from '../../bridge/nexo-bridge';
+
+const NARROW_WIDTH = 600;
+const LAB_MIN = 120;
+const DIAGRAM_MIN = 80;
+/** Vista de pantalla: ancho del popup en carga/error, margen lateral, alto mínimo libre encima y separación con la fila. */
+const PREVIEW_WIDTH = 300;
+const PREVIEW_GUTTER = 8;
+const PREVIEW_MIN_TOP = 44;
+const PREVIEW_GAP = 6;
+/** Miniatura: margen interior del popup (11 + 11) y alto mínimo/máximo. */
+const THUMB_INSET = 22;
+const THUMB_MIN_H = 140;
+const THUMB_MAX_H = 280;
+/** Menú de acciones del paso: espera antes de cerrarse al salir del número o del panel. */
+const STEP_MENU_CLOSE_MS = 160;
+
+type PreviewScroll = 'none' | 'ifHidden' | 'force';
+
+interface ArrowGeometry {
+  self: boolean;
+  /** Posición en % del carril (llamada interna) o del extremo izquierdo de la flecha. */
+  left: number;
+  width: number;
+  reverse: boolean;
+  /** Texto de la llamada interna a la izquierda (carril en la mitad derecha). */
+  textLeft: boolean;
+}
+
+const LANE_ICONS: Record<FlowLaneKind, string> = {
+  ui: 'bi-window', component: 'bi-puzzle', service: 'bi-gear', api: 'bi-hdd-network', db: 'bi-database',
+  queue: 'bi-inboxes', external: 'bi-cloud', other: 'bi-box',
+};
+
+/**
+ * Pestaña «Flujo · <título>» de Nexo IA: diagrama de secuencia animado con tres modos (Recorrido, Simular datos y
+ * Analizar logs) y el validador inferior. Copia de chatFront adaptada a la extensión (portapapeles por el host). El estado vive en `WorkspaceCodeAiFlowService`; aquí solo se pinta.
+ */
+@Component({
+  selector: 'app-workspace-code-ai-flow',
+  templateUrl: './workspace-code-ai-flow.component.html',
+  styleUrls: ['../workspace-code-ai-scroll.css', './workspace-code-ai-flow.component.css'],
+})
+export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDestroy {
+  @ViewChild('root') root?: ElementRef<HTMLDivElement>;
+  @ViewChild('main') main?: ElementRef<HTMLDivElement>;
+  @ViewChild('lab') lab?: ElementRef<HTMLDivElement>;
+  @ViewChild('detail') detail?: ElementRef<HTMLElement>;
+  @ViewChild('diagram') diagram?: ElementRef<HTMLDivElement>;
+  @ViewChild('canvas') canvas?: ElementRef<HTMLDivElement>;
+  @ViewChild('uiPreview') uiPreview?: ElementRef<HTMLElement>;
+  @ViewChild('uiFrame') uiFrame?: ElementRef<HTMLIFrameElement>;
+  @ViewChild('uiThumb') uiThumb?: ElementRef<HTMLDivElement>;
+  @ViewChild('uiZoomFrame') uiZoomFrame?: ElementRef<HTMLIFrameElement>;
+
+  narrow = false;
+  /** Paso con el menú de acciones abierto (`null` = ninguno). */
+  stepMenu: number | null = null;
+  private stepMenuTimer: ReturnType<typeof setTimeout> | null = null;
+  readonly speeds: (0.5 | 1 | 2)[] = [0.5, 1, 2];
+  private readonly baseModes: { id: FlowMode; icon: string; key: string }[] = [
+    { id: 'walk', icon: 'bi-play-circle', key: 'aiFlow.mode.walk' },
+    { id: 'sim', icon: 'bi-braces', key: 'aiFlow.mode.sim' },
+    { id: 'logs', icon: 'bi-terminal', key: 'aiFlow.mode.logs' },
+  ];
+  /** Vista de pantalla (fase 2): «Visualizar pantalla» en el menú del paso y en la tarjeta de resultado. */
+  readonly previewEnabled = true;
+
+  private readonly changesMode: { id: FlowMode; icon: string; key: string } = { id: 'changes', icon: 'bi-arrow-left-right', key: 'aiFlow.mode.changes' };
+  private readonly dbMode: { id: FlowMode; icon: string; key: string } = { id: 'db', icon: 'bi-database', key: 'aiFlow.mode.db' };
+  private readonly modeLists = new Map<string, { id: FlowMode; icon: string; key: string }[]>();
+
+  /**
+   * «Base de datos» solo aparece si el flujo toca la base de datos (después de «Analizar logs»); «Simular cambios», con una
+   * propuesta `pending`/`applied` del flujo abierto, siempre al final.
+   */
+  get modes(): { id: FlowMode; icon: string; key: string }[] {
+    const db = this.flowService.hasDb;
+    const changes = !!this.flowService.activeChange;
+    const key = `${db}|${changes}`;
+    let list = this.modeLists.get(key);
+    if (!list) {
+      list = [...this.baseModes, ...(db ? [this.dbMode] : []), ...(changes ? [this.changesMode] : [])];
+      this.modeLists.set(key, list);
+    }
+    return list;
+  }
+
+  private readonly sub = new Subscription();
+  private resizeObserver: ResizeObserver | null = null;
+  private scrollTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastStep = -1;
+  private dragOrigin: { top: number; bottom: number; height: number } | null = null;
+  private destroyed = false;
+  /** Vista previa: temporizador de la colocación, scroll pendiente y resultado mostrado la última vez. */
+  private previewTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Estilos inline previos del diagrama mientras está ampliado para que quepa el popup. */
+  private diagramSavedStyle: { minHeight: string; flexShrink: string } | null = null;
+  private previewScroll: PreviewScroll = 'none';
+  private previewKey: object | null = null;
+
+  constructor(
+    public flowService: WorkspaceCodeAiFlowService,
+    public preview: WorkspaceCodeAiUiPreviewService,
+    private notify: WorkspaceCodeNotifyService,
+    private i18n: WorkspaceCodeI18nService,
+    private bridge: NexoBridge,
+    private cdr: ChangeDetectorRef,
+    private zone: NgZone,
+  ) {}
+
+  ngOnInit(): void {
+    this.flowService.labMeasure = () => {
+      const el = this.lab?.nativeElement;
+      return el ? Math.round(el.getBoundingClientRect().height) : null;
+    };
+    this.sub.add(this.flowService.changed$.subscribe(() => {
+      if (this.destroyed) return;
+      this.cdr.markForCheck();
+      if (this.flowService.ui.step !== this.lastStep) {
+        this.lastStep = this.flowService.ui.step;
+        // Solo cuando avanza la reproducción: tras un clic, la fila bajo el cursor no se mueve.
+        if (this.flowService.player.lastChange === 'auto') this.scheduleScroll();
+      }
+      this.syncPreview();
+    }));
+    this.sub.add(this.preview.changed$.subscribe(() => {
+      if (this.destroyed) return;
+      this.cdr.markForCheck();
+      this.schedulePreviewLayout();
+    }));
+    this.sub.add(this.preview.reveal$.subscribe(() => {
+      if (this.destroyed) return;
+      this.cdr.markForCheck();
+      this.schedulePreviewLayout('force');
+    }));
+    this.syncPreview();
+  }
+
+  ngAfterViewInit(): void {
+    const root = this.root?.nativeElement;
+    if (!root) return;
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver((entries) => {
+        this.schedulePreviewLayout();
+        const width = entries[0]?.contentRect.width ?? root.clientWidth;
+        const narrow = width > 0 && width < NARROW_WIDTH;
+        if (narrow === this.narrow) return;
+        this.zone.run(() => {
+          this.narrow = narrow;
+          this.cdr.markForCheck();
+        });
+      });
+      this.resizeObserver.observe(root);
+    }
+    setTimeout(() => {
+      if (!this.destroyed) root.focus({ preventScroll: true });
+    });
+    this.schedulePreviewLayout();
+  }
+
+  ngOnDestroy(): void {
+    this.destroyed = true;
+    // Al ocultar la página el reproductor se pausa; el estado del flujo sobrevive en el servicio.
+    this.flowService.player.pause();
+    this.flowService.labMeasure = null;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    if (this.scrollTimer) clearTimeout(this.scrollTimer);
+    this.scrollTimer = null;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.previewTimer = null;
+    if (this.stepMenuTimer) clearTimeout(this.stepMenuTimer);
+    this.stepMenuTimer = null;
+    this.restoreDiagramHeight();
+    this.endDrag();
+    this.sub.unsubscribe();
+  }
+
+  /* ---------------------------- datos ---------------------------- */
+
+  get flow(): FlowDiagram | null {
+    return this.flowService.flow;
+  }
+
+  get step(): number {
+    return this.flowService.player.step;
+  }
+
+  get current(): FlowStep | null {
+    return this.flow?.steps[this.step] ?? null;
+  }
+
+  get result(): SimulationResult | LogAnalysisResult | null {
+    return this.flowService.result;
+  }
+
+  /** Modo «Base de datos»: acceso a datos del paso actual (`null` si no accede). */
+  get currentAccess(): FlowDbAccess | null {
+    return this.flowService.ui.mode === 'db' ? this.flowService.dbAccess(this.step) : null;
+  }
+
+  /** Modo «Base de datos»: posición del paso actual dentro del guion conducido (solo pasos con acceso). */
+  get dbFlowIndex(): number {
+    return Math.max(0, this.flowService.dbView?.indexes.indexOf(this.step) ?? 0);
+  }
+
+  private allIndexes: number[] = [];
+
+  /** Índices de los segmentos del pie: las paradas del reproductor o todos los pasos. */
+  get segmentIndexes(): number[] {
+    const stops = this.flowService.player.stops;
+    if (stops) return stops;
+    const n = this.flow?.steps.length ?? 0;
+    if (this.allIndexes.length !== n) this.allIndexes = Array.from({ length: n }, (_, i) => i);
+    return this.allIndexes;
+  }
+
+  /** Columnas del acceso con su valor del flujo (`col ← valor`). */
+  accessColumns(access: FlowDbAccess): { column: string; value: string | null }[] {
+    const values = access.values ?? {};
+    const columns = [...new Set([...access.columns, ...Object.keys(values)])];
+    return columns.map((column) => ({ column, value: values[column] ?? null }));
+  }
+
+  get logsResult():LogAnalysisResult | null {
+    return this.flowService.ui.mode === 'logs' ? this.flowService.ui.logsResult : null;
+  }
+
+  get pill(): FlowStatusPill {
+    return this.flowService.statusPill();
+  }
+
+  get fileCount(): number {
+    const flow = this.flow;
+    if (!flow) return 0;
+    const files = new Set<string>();
+    for (const ref of flow.files) files.add(ref.file);
+    for (const step of flow.steps) if (step.ref) files.add(step.ref.file);
+    return files.size;
+  }
+
+  /** Factor de tiempo de las animaciones del diagrama (`1 / velocidad`). */
+  get timeFactor(): string {
+    return String(1 / this.flowService.player.speed);
+  }
+
+  /** Selección manual de un paso: el índice sale de `data-step` del elemento pulsado (nunca de una clausura). */
+  onStep(event: Event): void {
+    const index = Number((event.currentTarget as HTMLElement | null)?.dataset['step']);
+    if (!Number.isInteger(index)) return;
+    this.flowService.selectStep(index);
+  }
+
+  laneX(lane: string | number): number {
+    const flow = this.flow;
+    if (!flow || !flow.lanes.length) return 50;
+    const index = typeof lane === 'number' ? lane : Math.max(0, flow.lanes.findIndex((l) => l.id === lane));
+    return ((index + 0.5) / flow.lanes.length) * 100;
+  }
+
+  laneIcon(lane: FlowLane): string {
+    return LANE_ICONS[lane.kind] ?? LANE_ICONS.other;
+  }
+
+  laneName(id: string): string {
+    const lane = this.flow?.lanes.find((l) => l.id === id);
+    return lane ? lane.name : id;
+  }
+
+  laneTone(lane: FlowLane): string | null {
+    return this.flowService.laneHighlight(lane.id);
+  }
+
+  arrow(step: FlowStep): ArrowGeometry {
+    const from = this.laneX(step.from);
+    const to = this.laneX(step.to);
+    if (step.from === step.to) return { self: true, left: from, width: 0, reverse: false, textLeft: from > 50 };
+    return { self: false, left: Math.min(from, to), width: Math.abs(to - from), reverse: to < from, textLeft: false };
+  }
+
+  rowState(index: number): FlowRowState {
+    return this.flowService.rowState(index);
+  }
+
+  inLogs(index: number): boolean {
+    return this.flowService.inLogs(index);
+  }
+
+  refLabel(ref: CodeRef | null, withFile = false): string {
+    if (!ref) return '';
+    const fn = `${ref.className}.${ref.functionName}()`;
+    if (!withFile) return `${fn} · L${ref.line}`;
+    const file = ref.file.slice(ref.file.lastIndexOf('/') + 1);
+    return `${fn} · ${file}:${ref.line}`;
+  }
+
+  /** Texto bajo la flecha: `Clase.función() · Lnn`, o el badge real en el paso que falla. */
+  subLine(step: FlowStep, index: number): string {
+    const state = this.rowState(index);
+    const r = this.result;
+    if ((state === 'fail' || state === 'stop') && r) {
+      const ref = r.where ?? step.ref;
+      return [r.badge, this.refLabel(ref, true)].filter(Boolean).join(' · ');
+    }
+    return this.refLabel(step.ref);
+  }
+
+  stepNumberText(index: number): string {
+    const state = this.rowState(index);
+    return state === 'fail' ? '!' : String(index + 1);
+  }
+
+  /* ---------------------------- resultado ---------------------------- */
+
+  badgeIcon(kind: ResultKind): string {
+    return kind === 'error' ? 'bi-x-octagon-fill' : kind === 'stop' ? 'bi-pause-circle-fill' : kind === 'ok' ? 'bi-check-circle-fill' : 'bi-question-circle';
+  }
+
+  resultStepIndex(): number {
+    const r = this.result;
+    const flow = this.flow;
+    if (!r || !flow || !r.failStepId) return -1;
+    return flow.steps.findIndex((s) => s.id === r.failStepId);
+  }
+
+  resultTone(): 'danger' | 'warning' | 'accent' {
+    const kind = this.result?.kind;
+    return kind === 'error' ? 'danger' : kind === 'stop' ? 'warning' : 'accent';
+  }
+
+  evidenceStep(e: LogEvidence): number {
+    if (!e.stepId || !this.flow) return -1;
+    return this.flow.steps.findIndex((s) => s.id === e.stepId);
+  }
+
+  get running(): boolean {
+    return !!this.result && !this.flowService.ui.resultVisible;
+  }
+
+  get runTotal(): number {
+    const fail = this.resultStepIndex();
+    return fail >= 0 ? fail + 1 : this.flow?.steps.length ?? 0;
+  }
+
+  /* ---------------------------- menú de acciones del paso ---------------------------- */
+
+  openStepMenu(index: number): void {
+    this.cancelStepMenuClose();
+    if (this.stepMenu === index) return;
+    this.stepMenu = index;
+    this.cdr.markForCheck();
+  }
+
+  scheduleStepMenuClose(): void {
+    this.cancelStepMenuClose();
+    this.stepMenuTimer = setTimeout(() => {
+      this.stepMenuTimer = null;
+      if (this.destroyed || this.stepMenu === null) return;
+      this.stepMenu = null;
+      this.cdr.markForCheck();
+    }, STEP_MENU_CLOSE_MS);
+  }
+
+  cancelStepMenuClose(): void {
+    if (this.stepMenuTimer) clearTimeout(this.stepMenuTimer);
+    this.stepMenuTimer = null;
+  }
+
+  /** En los 3 últimos pasos el menú se abre hacia arriba. */
+  menuUp(index: number): boolean {
+    return index >= (this.flow?.steps.length ?? 0) - 3;
+  }
+
+  private closeStepMenu(): void {
+    this.cancelStepMenuClose();
+    this.stepMenu = null;
+    this.cdr.markForCheck();
+  }
+
+  /** «Visualizar pantalla» (menú del paso ancla o botón de la tarjeta). */
+  visualize(event: Event): void {
+    event.stopPropagation();
+    this.closeStepMenu();
+    this.preview.show();
+  }
+
+  askStep(index: number): void {
+    this.closeStepMenu();
+    this.flowService.askAboutStep(index);
+  }
+
+  copyStep(index: number): void {
+    this.closeStepMenu();
+    const text = this.flowService.stepReference(index);
+    const fail = (error?: unknown): void => {
+      if (error !== undefined) console.warn('[Nexo IA] No se pudo copiar la referencia.', error instanceof Error ? error.name : '');
+      this.notify.show(this.i18n.t('aiFlow.stepMenu.copyFailed'), 'warning');
+    };
+    if (!text) {
+      fail();
+      return;
+    }
+    this.bridge.request<unknown>({ op: 'copy', text: text.slice(0, 10000) }).then(
+      () => this.notify.show(this.i18n.t('aiFlow.stepMenu.copied'), 'success'),
+      (error: unknown) => fail(error),
+    );
+  }
+
+  /* ---------------------------- vista de pantalla ---------------------------- */
+
+  get previewView(): UiScreenView | null {
+    return this.preview.view;
+  }
+
+  closePreview(): void {
+    this.preview.close();
+    this.root?.nativeElement.focus({ preventScroll: true });
+  }
+
+  private syncPreview(): void {
+    this.preview.sync(this.flowService.screenContext());
+    const key = this.preview.ctx?.key ?? null;
+    if (key !== this.previewKey) {
+      this.previewKey = key;
+      this.restoreDiagramHeight();
+    }
+    this.schedulePreviewLayout();
+  }
+
+  /**
+   * Asigna el `srcdoc` por `ElementRef` (sin pasar por el saneador de Angular; el iframe va con `sandbox=""`) y la
+   * geometría de la miniatura: iframe a 1280 de ancho escalado al popup y desplazado al encuadre (`frame.crop`).
+   */
+  private applyFrame(): void {
+    const view = this.preview.status === 'ready' ? this.previewView : null;
+    const frame = this.uiFrame?.nativeElement;
+    const thumb = this.uiThumb?.nativeElement;
+    const popup = this.uiPreview?.nativeElement;
+    if (frame && thumb && popup) {
+      const srcdoc = view?.srcdoc ?? '';
+      if (frame.srcdoc !== srcdoc) frame.srcdoc = srcdoc;
+      if (view) {
+        const crop = view.frame.crop;
+        const tw = Math.max(1, (popup.offsetWidth || PREVIEW_WIDTH) - THUMB_INSET);
+        const s = Math.min(1, tw / Math.max(1, crop.w));
+        const th = Math.min(THUMB_MAX_H, Math.max(THUMB_MIN_H, Math.round(crop.h * s)));
+        thumb.style.width = `${tw}px`;
+        thumb.style.height = `${th}px`;
+        frame.style.width = `${view.frame.width}px`;
+        frame.style.height = `${view.frame.height}px`;
+        frame.style.transform = `scale(${s})`;
+        frame.style.transformOrigin = '0 0';
+        frame.style.left = `${Math.round(-crop.x * s)}px`;
+        frame.style.top = `${Math.round(-crop.y * s)}px`;
+      }
+    }
+    const zoomFrame = this.uiZoomFrame?.nativeElement;
+    if (zoomFrame) {
+      const srcdoc = this.preview.zoom && view ? view.srcdoc : '';
+      if (zoomFrame.srcdoc !== srcdoc) zoomFrame.srcdoc = srcdoc;
+      if (view) {
+        zoomFrame.style.width = `${view.frame.width}px`;
+        zoomFrame.style.height = `${view.frame.height}px`;
+      }
+    }
+  }
+
+  private schedulePreviewLayout(scroll: PreviewScroll = 'none'): void {
+    if (scroll === 'force' || (scroll === 'ifHidden' && this.previewScroll === 'none')) this.previewScroll = scroll;
+    if (this.previewTimer) clearTimeout(this.previewTimer);
+    this.zone.runOutsideAngular(() => {
+      this.previewTimer = setTimeout(() => {
+        this.previewTimer = null;
+        if (this.destroyed) return;
+        const mode = this.previewScroll;
+        this.previewScroll = 'none';
+        this.applyFrame();
+        this.layoutPreview(mode);
+      }, 0);
+    });
+  }
+
+  /** Coloca el popup junto a la flecha del paso ancla (encima o debajo) y hace crecer el canvas si no cabe. */
+  private layoutPreview(scroll: PreviewScroll): void {
+    const canvas = this.canvas?.nativeElement;
+    if (!canvas) return;
+    const popup = this.uiPreview?.nativeElement;
+    const ctx = this.preview.ctx;
+    canvas.style.paddingBottom = '';
+    if (!popup || !ctx || !this.preview.open || this.preview.screenStep < 0) {
+      this.restoreDiagramHeight();
+      return;
+    }
+    const row = canvas.querySelector<HTMLElement>(`.wcf-row[data-step="${this.preview.screenStep}"]`);
+    if (!row) {
+      this.restoreDiagramHeight();
+      return;
+    }
+    const grew = this.fitDiagramHeight(popup);
+    const target = row.querySelector<HTMLElement>('.wcf-arrow, .wcf-loop') ?? row;
+    const cRect = canvas.getBoundingClientRect();
+    const rRect = row.getBoundingClientRect();
+    const aRect = target.getBoundingClientRect();
+    const width = popup.offsetWidth || PREVIEW_WIDTH;
+    const height = popup.offsetHeight;
+    const centerX = aRect.left + aRect.width / 2 - cRect.left;
+    const maxLeft = Math.max(PREVIEW_GUTTER, canvas.clientWidth - width - PREVIEW_GUTTER);
+    const left = Math.min(maxLeft, Math.max(PREVIEW_GUTTER, centerX - width / 2));
+    const total = this.flow?.steps.length ?? 0;
+    const rowTop = rRect.top - cRect.top;
+    const rowBottom = rRect.bottom - cRect.top;
+    const aboveTop = rowTop - height - PREVIEW_GAP;
+    // Entre los 3 últimos pasos: encima de la fila (si cabe); si no, debajo, tapando los pasos tachados.
+    const top = this.preview.screenStep >= total - 3 && aboveTop >= PREVIEW_MIN_TOP ? aboveTop : rowBottom + PREVIEW_GAP;
+    popup.style.left = `${Math.round(left)}px`;
+    popup.style.top = `${Math.round(top)}px`;
+    const basePadding = parseFloat(getComputedStyle(canvas).paddingBottom) || 0;
+    const extra = top + height + PREVIEW_GUTTER - canvas.offsetHeight;
+    if (extra > 0) canvas.style.paddingBottom = `${Math.ceil(basePadding + extra)}px`;
+    if (grew) {
+      this.revealInDiagram(popup);
+      return;
+    }
+    if (scroll === 'none') return;
+    const diagram = this.diagram?.nativeElement;
+    if (!diagram) return;
+    const dRect = diagram.getBoundingClientRect();
+    const pRect = popup.getBoundingClientRect();
+    const hidden = pRect.top < dRect.top || pRect.bottom > dRect.bottom || pRect.left < dRect.left || pRect.right > dRect.right;
+    if (scroll === 'force' || hidden) this.revealInDiagram(popup);
+  }
+
+  /** Desplaza solo el área del diagrama hasta el popup (`scrollIntoView` movería también la cabecera del flujo). */
+  private revealInDiagram(popup: HTMLElement): void {
+    const diagram = this.diagram?.nativeElement;
+    if (!diagram) return;
+    const dRect = diagram.getBoundingClientRect();
+    const pRect = popup.getBoundingClientRect();
+    if (pRect.bottom > dRect.bottom) diagram.scrollTop += Math.min(pRect.bottom - dRect.bottom, pRect.top - dRect.top);
+    else if (pRect.top < dRect.top) diagram.scrollTop -= dRect.top - pRect.top;
+    if (pRect.right > dRect.right) diagram.scrollLeft += pRect.right - dRect.right;
+    else if (pRect.left < dRect.left) diagram.scrollLeft -= dRect.left - pRect.left;
+  }
+
+  /**
+   * Si el área visible del diagrama es más baja que el popup (alto real + margen), la amplía con estilos inline
+   * temporales (`min-height` gana al `height` fijo de `changes` y al encogimiento flex de `sim`). Devuelve `true`
+   * cuando acaba de ampliarla.
+   */
+  private fitDiagramHeight(popup: HTMLElement): boolean {
+    const diagram = this.diagram?.nativeElement;
+    if (!diagram) return false;
+    const wasGrown = !!this.diagramSavedStyle;
+    const previousMin = diagram.style.minHeight;
+    this.restoreDiagramHeight();
+    const need = Math.ceil(popup.offsetHeight + 24);
+    if (popup.offsetHeight <= 0 || diagram.clientHeight >= need) return false;
+    const base = diagram.clientHeight;
+    this.diagramSavedStyle = { minHeight: diagram.style.minHeight, flexShrink: diagram.style.flexShrink };
+    diagram.style.minHeight = `${need}px`;
+    diagram.style.flexShrink = '0';
+    // Solo crece hasta el espacio libre del flujo: si desborda, la cabecera y el reproductor quedarían tapados.
+    const root = this.root?.nativeElement;
+    const overflow = root ? root.scrollHeight - root.clientHeight : 0;
+    if (overflow > 0) diagram.style.minHeight = `${Math.max(base, need - overflow)}px`;
+    if (root) root.scrollTop = 0;
+    return !wasGrown || previousMin !== diagram.style.minHeight;
+  }
+
+  /** Restaura los estilos inline previos del diagrama (popup cerrado, otro resultado o destrucción). */
+  private restoreDiagramHeight(): void {
+    const saved = this.diagramSavedStyle;
+    if (!saved) return;
+    this.diagramSavedStyle = null;
+    const diagram = this.diagram?.nativeElement;
+    if (!diagram) return;
+    diagram.style.minHeight = saved.minHeight;
+    diagram.style.flexShrink = saved.flexShrink;
+  }
+
+  /* ---------------------------- validador ---------------------------- */
+
+  get inputText(): string {
+    return this.flowService.ui.mode === 'logs' ? this.flowService.ui.logsInput : this.flowService.ui.simInput;
+  }
+
+  get inputRows(): number {
+    const lines = this.inputText.split('\n').length;
+    return Math.min(18, Math.max(6, lines));
+  }
+
+  onInput(event: Event): void {
+    const value = (event.target as HTMLTextAreaElement).value;
+    if (this.flowService.ui.mode === 'logs') this.flowService.setLogsInput(value);
+    else this.flowService.setSimInput(value);
+  }
+
+  run(): void {
+    if (this.flowService.ui.mode === 'logs') void this.flowService.analyze();
+    else void this.flowService.simulate();
+  }
+
+  get canRun(): boolean {
+    const ui = this.flowService.ui;
+    return !ui.busy && !!this.inputText.trim();
+  }
+
+  /* ---------------------------- separador horizontal ---------------------------- */
+
+  startDrag(event: PointerEvent): void {
+    if (event.button !== 0) return;
+    const main = this.main?.nativeElement.getBoundingClientRect();
+    // El mismo separador redimensiona el validador (Simular datos / Analizar logs) o el detalle del Recorrido.
+    const lab = (this.lab ?? this.detail)?.nativeElement.getBoundingClientRect();
+    if (!main || !lab) return;
+    event.preventDefault();
+    this.dragOrigin = { top: main.top, bottom: main.bottom, height: main.height };
+    this.zone.runOutsideAngular(() => {
+      window.addEventListener('pointermove', this.onDragMove);
+      window.addEventListener('pointerup', this.endDrag);
+      window.addEventListener('pointercancel', this.endDrag);
+    });
+  }
+
+  private onDragMove = (event: PointerEvent): void => {
+    const origin = this.dragOrigin;
+    if (!origin) return;
+    const max = Math.max(LAB_MIN, origin.height - DIAGRAM_MIN - 7);
+    const height = Math.round(Math.min(max, Math.max(LAB_MIN, origin.bottom - event.clientY)));
+    this.zone.run(() => this.flowService.setLabHeight(height));
+  };
+
+  private endDrag = (): void => {
+    window.removeEventListener('pointermove', this.onDragMove);
+    window.removeEventListener('pointerup', this.endDrag);
+    window.removeEventListener('pointercancel', this.endDrag);
+    this.dragOrigin = null;
+  };
+
+  resetLab(): void {
+    this.flowService.setLabHeight(null);
+  }
+
+  /* ---------------------------- teclado ---------------------------- */
+
+  onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') {
+      if (this.stepMenu !== null) {
+        event.preventDefault();
+        this.closeStepMenu();
+        return;
+      }
+      if (this.preview.zoom) {
+        event.preventDefault();
+        this.preview.closeZoom();
+        return;
+      }
+      if (this.preview.open) {
+        event.preventDefault();
+        this.closePreview();
+        return;
+      }
+    }
+    const target = event.target as HTMLElement | null;
+    if (target?.closest?.('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const player = this.flowService.player;
+    if (event.key === ' ' || event.code === 'Space') {
+      if (target?.closest?.('button')) return;
+      event.preventDefault();
+      player.toggle();
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      this.flowService.selectStep(player.step - 1);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      this.flowService.selectStep(player.step + 1);
+    }
+  }
+
+  /* ---------------------------- utilidades ---------------------------- */
+
+  private scheduleScroll(): void {
+    if (this.scrollTimer) clearTimeout(this.scrollTimer);
+    this.scrollTimer = setTimeout(() => {
+      this.scrollTimer = null;
+      const row = this.diagram?.nativeElement.querySelector<HTMLElement>('.wcf-row.is-current, .wcf-row.is-fail, .wcf-row.is-stop');
+      row?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }, 30);
+  }
+
+  trackLane = (_: number, lane: FlowLane) => lane.id;
+  trackStep = (_: number, step: FlowStep) => step.id;
+  trackValue = (_: number, v: number) => v;
+  trackIndex = (index: number) => index;
+  trackEvidence = (_: number, e: LogEvidence) => e.index;
+}

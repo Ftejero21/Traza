@@ -1,0 +1,22 @@
+<div class="wcs" *ngIf="view" [attr.data-tone]="tone">
+  <div class="wcs__head">
+    <i class="bi" [ngClass]="view.generated ? 'bi-braces' : 'bi-file-earmark-code'" aria-hidden="true"></i>
+    <span class="wcs__loc" [title]="view.file">{{ location }}</span>
+    <span class="wcs__badge" *ngIf="view.verification === 'corrected' && !view.generated">{{ 'aiFlow.corrected' | wcT }}</span>
+    <button type="button" class="wcs__open" *ngIf="openable" (click)="open.emit(); $event.stopPropagation()">
+      <i class="bi bi-box-arrow-up-right" aria-hidden="true"></i>{{ 'aiFlow.openEditor' | wcT }}
+    </button>
+  </div>
+  <div class="wcs__cached" *ngIf="view.cached && !view.generated" role="note">
+    <i class="bi bi-clock-history" aria-hidden="true"></i>{{ 'ai.flow.cachedSnippet' | wcT }}
+  </div>
+  <div class="wcs__warn" *ngIf="view.verification === 'unverified' && !view.generated && !view.cached" role="note">
+    <i class="bi bi-exclamation-triangle" aria-hidden="true"></i>{{ 'ai.flow.unverified' | wcT }}
+  </div>
+  <div class="wcs__code" *ngIf="rows.length">
+    <div class="wcs__row" *ngFor="let row of rows; trackBy: trackRow" [class.is-marked]="row.marked">
+      <span class="wcs__num">{{ row.number }}</span>
+      <span class="wcs__text"><span *ngFor="let t of row.tokens; trackBy: trackToken" [attr.data-k]="t.kind">{{ t.text }}</span></span>
+    </div>
+  </div>
+</div>

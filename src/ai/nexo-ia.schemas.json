@@ -1,0 +1,412 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Esquemas de salida estructurada para el modelo. Deben coincidir con contracts/nexo-ia.types.ts. 'verification' no aparece porque la rellena el frontend.",
+  "$defs": {
+    "CodeRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mountId", "file", "line", "anchor", "className", "functionName"],
+      "properties": {
+        "mountId": { "type": "string" },
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "anchor": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "className": { "type": "string", "minLength": 1 },
+        "functionName": { "type": "string", "minLength": 1 }
+      }
+    },
+    "CodeSnippet": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["ref", "startLine", "length", "highlightLine", "language"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/CodeRef" },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "length": { "type": "integer", "minimum": 1, "maximum": 12 },
+        "highlightLine": { "type": "integer", "minimum": 1 },
+        "language": { "type": "string" }
+      }
+    },
+    "ResultKind": { "enum": ["error", "stop", "ok", "none"] },
+    "Confidence": { "enum": ["alta", "media", "baja"] },
+    "FlowDiagnosis": {
+      "type": "object",
+      "required": ["kind", "failStepId", "badge", "title", "where", "conclusion", "userImpact", "fix", "snippet", "confidence", "confidenceReason"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/ResultKind" },
+        "failStepId": { "type": ["string", "null"] },
+        "badge": { "type": "string", "maxLength": 24 },
+        "httpStatus": { "type": "integer" },
+        "title": { "type": "string", "maxLength": 90 },
+        "where": { "oneOf": [{ "$ref": "#/$defs/CodeRef" }, { "type": "null" }] },
+        "field": { "type": "string", "maxLength": 80 },
+        "conclusion": { "type": "string", "maxLength": 900 },
+        "userImpact": { "type": "string", "maxLength": 400 },
+        "fix": { "type": "string", "maxLength": 600 },
+        "snippet": { "$ref": "#/$defs/CodeSnippet" },
+        "confidence": { "$ref": "#/$defs/Confidence" },
+        "confidenceReason": { "type": "string", "maxLength": 160 }
+      }
+    },
+    "UiPreviewState": { "enum": ["blocked", "silent", "message", "success"] },
+    "UiPlanMark": {
+      "type": "object", "additionalProperties": false, "required": ["selector", "label"],
+      "properties": {
+        "selector": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 40 }
+      }
+    },
+    "UiPlanInject": {
+      "type": "object", "additionalProperties": false, "required": ["after", "component"],
+      "properties": {
+        "after": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "component": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "inputs": { "type": "object" }
+      }
+    },
+    "UiPreviewPlanBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "state", "bindings", "mark", "caption"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "state": { "$ref": "#/$defs/UiPreviewState" },
+        "bindings": { "type": "object" },
+        "mark": { "$ref": "#/$defs/UiPlanMark" },
+        "inject": { "$ref": "#/$defs/UiPlanInject" },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 140 }
+      }
+    },
+    "FlowScenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "input", "result"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1, "maxLength": 28 },
+        "input": {},
+        "result": {
+          "type": "object",
+          "allOf": [{ "$ref": "#/$defs/FlowDiagnosis" }],
+          "required": ["executedStepIds", "skippedStepIds"],
+          "properties": {
+            "executedStepIds": { "type": "array", "items": { "type": "string" } },
+            "skippedStepIds": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    }
+  },
+
+  "FlowDiagram": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["id", "title", "question", "summary", "errorSummary", "lanes", "steps", "errorExits", "inputExample", "simulationPresets", "files"],
+    "properties": {
+      "id": { "type": "string" },
+      "title": { "type": "string", "maxLength": 60 },
+      "question": { "type": "string" },
+      "summary": { "type": "string", "maxLength": 600 },
+      "errorSummary": { "type": "string", "maxLength": 500 },
+      "lanes": {
+        "type": "array", "minItems": 2, "maxItems": 7,
+        "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "name", "short", "sub", "kind"],
+          "properties": {
+            "id": { "type": "string" },
+            "name": { "type": "string", "maxLength": 24 },
+            "short": { "type": "string", "maxLength": 12 },
+            "sub": { "type": "string", "maxLength": 20 },
+            "kind": { "enum": ["ui", "component", "service", "api", "db", "queue", "external", "other"] }
+          }
+        }
+      },
+      "steps": {
+        "type": "array", "minItems": 2, "maxItems": 20,
+        "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["id", "from", "to", "label", "title", "explanation", "kind", "ref", "snippet"],
+          "properties": {
+            "id": { "type": "string" },
+            "from": { "type": "string" },
+            "to": { "type": "string" },
+            "label": { "type": "string", "maxLength": 48 },
+            "title": { "type": "string", "maxLength": 70 },
+            "explanation": { "type": "string", "maxLength": 420 },
+            "kind": { "enum": ["code", "sql", "http", "event", "generated"] },
+            "ref": { "oneOf": [{ "$ref": "#/$defs/CodeRef" }, { "type": "null" }] },
+            "snippet": { "$ref": "#/$defs/CodeSnippet" },
+            "generatedCode": {
+              "type": "object", "additionalProperties": false,
+              "required": ["title", "language", "code", "highlightIndex"],
+              "properties": {
+                "title": { "type": "string" }, "language": { "type": "string" },
+                "code": { "type": "string", "maxLength": 1200 }, "highlightIndex": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        }
+      },
+      "errorExits": {
+        "type": "array",
+        "items": {
+          "type": "object", "additionalProperties": false, "required": ["stepId", "condition"],
+          "properties": { "stepId": { "type": "string" }, "httpStatus": { "type": "integer" }, "condition": { "type": "string" } }
+        }
+      },
+      "inputExample": {},
+      "simulationPresets": {
+        "type": "array", "minItems": 3, "maxItems": 8,
+        "items": {
+          "type": "object", "additionalProperties": false, "required": ["id", "label", "input", "expected"],
+          "properties": {
+            "id": { "type": "string" },
+            "label": { "type": "string", "maxLength": 28 },
+            "input": {},
+            "expected": {
+              "type": "object", "additionalProperties": false, "required": ["kind", "failStepId"],
+              "properties": { "kind": { "$ref": "#/$defs/ResultKind" }, "failStepId": { "type": ["string", "null"] }, "httpStatus": { "type": "integer" } }
+            }
+          }
+        }
+      },
+      "files": { "type": "array", "items": { "$ref": "#/$defs/CodeRef" } },
+      "scenario": { "$ref": "#/$defs/FlowScenario" }
+    }
+  },
+
+  "SimulationResult": {
+    "allOf": [{ "$ref": "#/$defs/FlowDiagnosis" }],
+    "required": ["executedStepIds", "skippedStepIds"],
+    "properties": {
+      "executedStepIds": { "type": "array", "items": { "type": "string" } },
+      "skippedStepIds": { "type": "array", "items": { "type": "string" } }
+    }
+  },
+
+  "UiPreviewPlan": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["root", "state", "bindings", "mark", "caption"],
+    "properties": {
+      "root": { "type": "string", "minLength": 1, "maxLength": 120 },
+      "state": { "$ref": "#/$defs/UiPreviewState" },
+      "bindings": { "type": "object" },
+      "mark": { "$ref": "#/$defs/UiPlanMark" },
+      "inject": { "$ref": "#/$defs/UiPlanInject" },
+      "caption": { "type": "string", "minLength": 1, "maxLength": 140 },
+      "after": { "$ref": "#/$defs/UiPreviewPlanBody" }
+    }
+  },
+
+  "FlowDbMap": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["summary", "tables", "relations", "accesses"],
+    "properties": {
+      "summary": { "type": "string", "maxLength": 240 },
+      "tables": {
+        "type": "array", "maxItems": 8,
+        "items": {
+          "type": "object", "additionalProperties": false, "required": ["name", "columns"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "entity": { "type": ["string", "null"], "maxLength": 80 },
+            "columns": {
+              "type": "array", "minItems": 1, "maxItems": 16,
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["name", "type", "pk"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+                  "type": { "type": "string", "maxLength": 32 },
+                  "pk": { "type": "boolean" },
+                  "nullable": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "relations": {
+        "type": "array", "maxItems": 12,
+        "items": {
+          "type": "object", "additionalProperties": false, "required": ["from", "fromColumn", "to", "toColumn"],
+          "properties": {
+            "from": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "fromColumn": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "to": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "toColumn": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
+        }
+      },
+      "accesses": {
+        "type": "array", "maxItems": 20,
+        "items": {
+          "type": "object", "additionalProperties": false,
+          "required": ["stepId", "table", "op", "direction", "columns", "fn"],
+          "properties": {
+            "stepId": { "type": "string", "minLength": 1, "maxLength": 80 },
+            "table": { "type": "string", "minLength": 1, "maxLength": 64 },
+            "op": { "enum": ["SELECT", "INSERT", "UPDATE", "DELETE", "UPSERT"] },
+            "direction": { "enum": ["toDb", "fromDb"] },
+            "columns": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+            "values": { "type": "object" },
+            "via": { "type": ["string", "null"], "maxLength": 64 },
+            "fn": { "type": "string", "maxLength": 80 },
+            "note": { "type": "string", "maxLength": 160 }
+          }
+        }
+      }
+    }
+  },
+
+  "LogAnalysisResult": {
+    "allOf": [{ "$ref": "#/$defs/FlowDiagnosis" }],
+    "required": ["evidence", "seenStepIds"],
+    "properties": {
+      "evidence": {
+        "type": "array",
+        "items": {
+          "type": "object", "required": ["index", "text", "stepId", "tone"],
+          "properties": {
+            "index": { "type": "integer", "minimum": 0 }, "text": { "type": "string" },
+            "stepId": { "type": ["string", "null"] }, "tone": { "enum": ["info", "error", "trace"] }
+          }
+        }
+      },
+      "seenStepIds": { "type": "array", "items": { "type": "string" } }
+    }
+  },
+
+  "ChangeProposal": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "id",
+      "request",
+      "title",
+      "summary",
+      "files",
+      "flowId",
+      "risks"
+    ],
+    "properties": {
+      "id": {
+        "type": "string"
+      },
+      "request": {
+        "type": "string"
+      },
+      "title": {
+        "type": "string",
+        "maxLength": 70
+      },
+      "summary": {
+        "type": "string",
+        "maxLength": 500
+      },
+      "flowId": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "risks": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "maxItems": 5
+      },
+      "files": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 12,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mountId",
+            "path",
+            "note",
+            "status",
+            "hunks"
+          ],
+          "properties": {
+            "mountId": {
+              "type": "string"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "note": {
+              "type": "string",
+              "maxLength": 60
+            },
+            "status": {
+              "enum": [
+                "modified",
+                "added",
+                "deleted"
+              ]
+            },
+            "hunks": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "header",
+                  "oldStart",
+                  "newStart",
+                  "lines"
+                ],
+                "properties": {
+                  "header": {
+                    "type": "string",
+                    "maxLength": 80
+                  },
+                  "oldStart": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "newStart": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "lines": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "text"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "enum": [
+                            "context",
+                            "add",
+                            "del"
+                          ]
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

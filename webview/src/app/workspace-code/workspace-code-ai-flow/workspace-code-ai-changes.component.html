@@ -1,0 +1,148 @@
+<div class="wcx" *ngIf="proposal as p" [class.is-narrow]="narrow">
+  <!-- Cambios propuestos -->
+  <section class="wcx__col wcx__diff-col">
+    <header class="wcx__head">
+      <h3 class="wcx__title"><i class="bi bi-file-diff" aria-hidden="true"></i>{{ 'aiChange.title' | wcT }}</h3>
+      <span class="wcx__status" [attr.data-status]="p.status">
+        <i class="bi" [ngClass]="p.status === 'applied' ? 'bi-check2-circle' : 'bi-hourglass-split'" aria-hidden="true"></i>
+        {{ (p.status === 'applied' ? 'aiChange.status.applied' : 'aiChange.status.pending') | wcT }}
+      </span>
+    </header>
+    <p class="wcx__summary" *ngIf="p.summary">{{ p.summary }}</p>
+
+    <div class="wcx__diff">
+      <div class="wcx__file" *ngFor="let f of files; trackBy: trackFile">
+        <div class="wcx__file-head">
+          <i class="bi" [ngClass]="fileIcon(f.change)" aria-hidden="true"></i>
+          <span class="wcx__path" [title]="f.change.path">{{ f.change.path }}</span>
+          <span class="wcx__tag" *ngIf="f.change.status === 'added'">{{ 'aiChange.newFile' | wcT }}</span>
+          <span class="wcx__tag is-del" *ngIf="f.change.status === 'deleted'">{{ 'aiChange.deletedFile' | wcT }}</span>
+          <span class="wcx__n is-add">+{{ f.change.additions }}</span>
+          <span class="wcx__n is-del">−{{ f.change.deletions }}</span>
+        </div>
+        <div class="wcx__hunk" *ngFor="let h of f.hunks; trackBy: trackIndex">
+          <div class="wcx__hunk-head" *ngIf="h.header">{{ h.header }}</div>
+          <div class="wcx__line" *ngFor="let r of h.rows; trackBy: trackIndex" [attr.data-kind]="r.kind">
+            <span class="wcx__ln">{{ r.oldLine ?? '' }}</span>
+            <span class="wcx__ln">{{ r.newLine ?? '' }}</span>
+            <span class="wcx__sign">{{ r.sign }}</span>
+            <span class="wcx__code"><span *ngFor="let t of r.tokens; trackBy: trackIndex" [attr.data-k]="t.kind">{{ t.text }}</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p class="wcx__block" *ngIf="blockReason as reason" role="note"><i class="bi bi-lock" aria-hidden="true"></i>{{ reason }}</p>
+    <div class="wcx__actions" *ngIf="p.status === 'pending'">
+      <button type="button" class="wcx__btn wcx__btn--apply" [disabled]="!canRun('ai.applyChange')" [title]="blockReason || ''" (click)="run('ai.applyChange', $event)">
+        <i class="bi bi-check2" aria-hidden="true"></i>{{ 'aiChange.apply' | wcT }}
+      </button>
+      <button type="button" class="wcx__btn" [disabled]="!canRun('ai.discardChange')" (click)="run('ai.discardChange', $event)">
+        <i class="bi bi-x" aria-hidden="true"></i>{{ 'aiChange.discard' | wcT }}
+      </button>
+      <span class="wcx__hint">{{ 'aiChange.noChangesUntil' | wcT }}</span>
+    </div>
+    <div class="wcx__actions" *ngIf="p.status === 'applied'">
+      <button type="button" class="wcx__btn" [disabled]="!canRun('ai.undoChange')" (click)="run('ai.undoChange', $event)">
+        <i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i>{{ 'aiChange.undo' | wcT }}
+      </button>
+      <span class="wcx__hint">{{ 'aiChange.applied' | wcT: { n: p.files.length } }}</span>
+    </div>
+  </section>
+
+  <!-- Antes y después -->
+  <section class="wcx__col wcx__cmp-col">
+    <header class="wcx__head">
+      <h3 class="wcx__title"><i class="bi bi-arrow-left-right" aria-hidden="true"></i>{{ 'aiChange.beforeAfter' | wcT }}</h3>
+      <div class="wcx__sides" role="radiogroup" [attr.aria-label]="'aiChange.beforeAfter' | wcT">
+        <button type="button" role="radio" [class.is-on]="side === 'before'" [attr.aria-checked]="side === 'before'" [disabled]="!current"
+          (click)="flowService.setSide('before')">{{ 'aiChange.side.before' | wcT }}</button>
+        <button type="button" role="radio" [class.is-on]="side === 'after'" [attr.aria-checked]="side === 'after'" [disabled]="!current"
+          (click)="flowService.setSide('after')">{{ 'aiChange.side.after' | wcT }}</button>
+      </div>
+    </header>
+
+    <div class="wcx__error" *ngIf="flowService.ui.changeError as err; else cmpBody" role="alert">
+      <i class="bi bi-exclamation-octagon" aria-hidden="true"></i>
+      <span>{{ err }}</span>
+      <button type="button" class="wcx__btn" [disabled]="flowService.ui.changeBusy" (click)="retry()"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>{{ 'ai.retry' | wcT }}</button>
+    </div>
+
+    <ng-template #cmpBody>
+      <div class="wcx__wait" *ngIf="flowService.ui.changeBusy" role="status">
+        <span class="wcx__pulse" aria-hidden="true"><span></span><span></span><span></span></span>{{ 'aiChange.comparing' | wcT }}
+      </div>
+
+      <div class="wcx__empty" *ngIf="!flowService.ui.changeBusy && !comparison">
+        <i class="bi bi-arrow-left-right" aria-hidden="true"></i>
+        <button type="button" class="wcx__play" [disabled]="!canRun('ai.simulateChange')" (click)="run('ai.simulateChange', $event)">
+          <i class="bi bi-play-fill" aria-hidden="true"></i>{{ 'aiChange.simulate' | wcT }}
+        </button>
+      </div>
+
+      <ng-container *ngIf="!flowService.ui.changeBusy && comparison as cmp">
+        <button type="button" class="wcx__play" [disabled]="!current" (click)="flowService.playBeforeAfter()">
+          <i class="bi bi-play-fill" aria-hidden="true"></i>{{ 'aiChange.playBoth' | wcT }}
+        </button>
+
+        <div class="wcx__chips">
+          <span class="wcx__chip" *ngFor="let tag of tags" [attr.data-tag]="tag">{{ ('aiChange.count.' + tag) | wcT: { n: count(tag) } }}</span>
+        </div>
+        <p class="wcx__source" *ngIf="cmp.source as src">
+          <i class="bi bi-cpu" aria-hidden="true"></i>{{ ('aiChange.source.' + src.provider) | wcT: { model: src.model ?? '' } }}
+        </p>
+
+        <div class="wcx__table-wrap">
+          <table class="wcx__table">
+            <thead>
+              <tr>
+                <th>{{ 'aiChange.col.case' | wcT }}</th>
+                <th>{{ 'aiChange.col.result' | wcT }}</th>
+                <th>{{ 'aiChange.col.tag' | wcT }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let c of cmp.cases; trackBy: trackCase" [class.is-on]="flowService.ui.changeCase === c.preset.id" [attr.data-tag]="c.tag"
+                tabindex="0" (click)="selectCase(c.preset.id, $event)" (keydown.enter)="selectCase(c.preset.id, $event)">
+                <td class="wcx__case" [title]="c.preset.label">{{ c.preset.label }}</td>
+                <td class="wcx__res">
+                  <span class="wcx__badge" [attr.data-kind]="c.before.kind">{{ resultText(c.before) }}</span>
+                  <i class="bi bi-arrow-right" aria-hidden="true"></i>
+                  <span class="wcx__badge" [attr.data-kind]="c.after.kind">{{ resultText(c.after) }}</span>
+                </td>
+                <td><span class="wcx__tagcell" [attr.data-tag]="c.tag">{{ ('aiChange.tag.' + c.tag) | wcT }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="wcx__cards" *ngIf="current as cur">
+          <article class="wcx__card" [class.is-on]="side === 'before'" [attr.data-kind]="cur.before.kind">
+            <span class="wcx__card-side">{{ 'aiChange.card.before' | wcT }}</span>
+            <span class="wcx__badge" [attr.data-kind]="cur.before.kind"><i class="bi" [ngClass]="badgeIcon(cur.before.kind)" aria-hidden="true"></i>{{ resultText(cur.before) }}</span>
+            <h4 class="wcx__card-title">{{ cur.before.title }}</h4>
+            <div class="wcx__card-impact" *ngIf="cur.before.userImpact || preview.screenStep >= 0">
+              <h5><i class="bi bi-person" aria-hidden="true"></i>{{ 'aiChange.userSees' | wcT }}</h5>
+              <p *ngIf="cur.before.userImpact">{{ cur.before.userImpact }}</p>
+              <button type="button" class="wcx__btn wcx__preview" *ngIf="preview.screenStep >= 0 && !preview.open" (click)="openPreview('now', $event)">
+                <i class="bi bi-display" aria-hidden="true"></i>{{ 'aiFlow.stepMenu.visualize' | wcT }}
+              </button>
+            </div>
+          </article>
+          <article class="wcx__card" [class.is-on]="side === 'after'" [attr.data-kind]="cur.after.kind">
+            <span class="wcx__card-side">{{ 'aiChange.card.after' | wcT }}</span>
+            <span class="wcx__badge" [attr.data-kind]="cur.after.kind"><i class="bi" [ngClass]="badgeIcon(cur.after.kind)" aria-hidden="true"></i>{{ resultText(cur.after) }}</span>
+            <h4 class="wcx__card-title">{{ cur.after.title }}</h4>
+            <div class="wcx__card-impact" *ngIf="cur.after.userImpact || preview.screenStep >= 0">
+              <h5><i class="bi bi-person" aria-hidden="true"></i>{{ 'aiChange.userSees' | wcT }}</h5>
+              <p *ngIf="cur.after.userImpact">{{ cur.after.userImpact }}</p>
+              <button type="button" class="wcx__btn wcx__preview" *ngIf="preview.screenStep >= 0 && !preview.open" (click)="openPreview('after', $event)">
+                <i class="bi bi-display" aria-hidden="true"></i>{{ 'aiFlow.stepMenu.visualize' | wcT }}
+              </button>
+            </div>
+          </article>
+        </div>
+      </ng-container>
+    </ng-template>
+  </section>
+</div>

@@ -1,0 +1,8 @@
+<app-workspace-code-ai-flow style="flex: 1; min-height: 0"></app-workspace-code-ai-flow>
+
+<div class="nexo-toasts" aria-live="polite">
+  <div *ngFor="let t of toasts; trackBy: trackToast" class="nexo-toast" [attr.data-tone]="t.level" role="status">
+    <i class="bi" [ngClass]="t.level === 'success' ? 'bi-check-circle-fill' : t.level === 'danger' ? 'bi-x-octagon-fill' : t.level === 'warning' ? 'bi-exclamation-triangle-fill' : 'bi-info-circle-fill'" aria-hidden="true"></i>
+    <span>{{ t.text }}</span>
+  </div>
+</div>

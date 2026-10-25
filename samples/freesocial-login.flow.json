@@ -1,0 +1,142 @@
+{
+  "flow": {
+    "id": "freesocial-login",
+    "title": "Login de FreeSocial",
+    "question": "¿Cómo funciona el login en FreeSocial?",
+    "summary": "InicioComponent envía el formulario a LoginService, que hace POST /api/usuario/login. UsuarioController valida que el email exista y delega en UsuarioServiceImpl.authenticate(), que busca el usuario, compara la contraseña descifrada y devuelve un JWT.",
+    "errorSummary": "Si el formulario no es válido no se envía nada. Si el email no existe, UsuarioValidador rechaza la petición. Si la contraseña no coincide, authenticate() lanza FreeSocialException(\"error.login\").",
+    "lanes": [
+      { "id": "inicio", "name": "InicioComponent", "short": "Inicio", "sub": "Angular", "kind": "component" },
+      { "id": "loginService", "name": "LoginService", "short": "LoginService", "sub": "Angular", "kind": "service" },
+      { "id": "controller", "name": "UsuarioController", "short": "Controller", "sub": "Spring Boot", "kind": "api" },
+      { "id": "usuarioService", "name": "UsuarioServiceImpl", "short": "UsuarioSvc", "sub": "Spring Boot", "kind": "service" },
+      { "id": "db", "name": "MySQL", "short": "BD", "sub": "MySQL · freesocial", "kind": "db" }
+    ],
+    "steps": [
+      {
+        "id": "s1", "from": "inicio", "to": "inicio", "label": "(submit)=\"onLogin()\"", "kind": "code",
+        "title": "El usuario envía el formulario",
+        "explanation": "Al enviar el formulario se ejecuta onLogin(). Si loginForm no es válido, el método termina sin llamar al backend.",
+        "ref": { "mountId": "", "file": "FreeSocial/src/app/Components/Inicio/inicio/inicio.component.ts", "line": 451, "anchor": "if (this.loginForm.valid) {", "className": "InicioComponent", "functionName": "onLogin" },
+        "snippet": null
+      },
+      {
+        "id": "s2", "from": "inicio", "to": "loginService", "label": "loginService.login(formData)", "kind": "code",
+        "title": "El componente llama a LoginService",
+        "explanation": "Limpia los avisos previos y delega en LoginService.login() con los datos del formulario (email, password, recordado).",
+        "ref": { "mountId": "", "file": "FreeSocial/src/app/Components/Inicio/inicio/inicio.component.ts", "line": 455, "anchor": "this.loginService.login(formData).subscribe(", "className": "InicioComponent", "functionName": "onLogin" },
+        "snippet": null
+      },
+      {
+        "id": "s3", "from": "loginService", "to": "controller", "label": "POST /api/usuario/login", "kind": "http",
+        "title": "Petición HTTP al backend",
+        "explanation": "LoginService envía un POST con el LoginRequest al endpoint de login de Spring Boot.",
+        "ref": { "mountId": "", "file": "FreeSocial/src/app/Service/Login/login.service.ts", "line": 16, "anchor": "return this.httpClient.post<any>(API_ENDPOINT + \"usuario/login\", data);", "className": "LoginService", "functionName": "login" },
+        "snippet": null,
+        "generatedCode": { "title": "POST /api/usuario/login", "language": "http", "code": "POST /api/usuario/login\nContent-Type: application/json\n\n{ \"email\": \"ana@freesocial.com\", \"password\": \"***\", \"recordado\": false }", "highlightIndex": 0 }
+      },
+      {
+        "id": "s4", "from": "controller", "to": "controller", "label": "usuarioValidador.validateLogin()", "kind": "code",
+        "title": "Validación del email",
+        "explanation": "UsuarioValidador busca el usuario por email; si no existe añade el error «error.email.mismatch» y el controlador responde con los errores de validación.",
+        "ref": { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Controller/UsuarioController/UsuarioController.java", "line": 88, "anchor": "usuarioValidador.validateLogin(usuarioDTO, result);", "className": "UsuarioController", "functionName": "loginUser" },
+        "snippet": null
+      },
+      {
+        "id": "s5", "from": "controller", "to": "usuarioService", "label": "authenticate(usuarioDTO, false)", "kind": "code",
+        "title": "El controlador delega la autenticación",
+        "explanation": "Si no hay errores de validación, loginUser() llama a UsuarioServiceImpl.authenticate() sin modo registro.",
+        "ref": { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Controller/UsuarioController/UsuarioController.java", "line": 95, "anchor": "ResponseDTO dto = usuarioService.authenticate(usuarioDTO, false);", "className": "UsuarioController", "functionName": "loginUser" },
+        "snippet": null
+      },
+      {
+        "id": "s6", "from": "usuarioService", "to": "db", "label": "findByEmail(email)", "kind": "sql",
+        "title": "Búsqueda del usuario por email",
+        "explanation": "authenticate() carga el UsuarioEntity con UsuarioRepository.findByEmail(). Si devolviera null, usuario.getPassword() fallaría.",
+        "ref": { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Repository/UsuarioRepository.java", "line": 16, "anchor": "public UsuarioEntity findByEmail(String email);", "className": "UsuarioRepository", "functionName": "findByEmail" },
+        "snippet": null,
+        "generatedCode": { "title": "SQL", "language": "sql", "code": "SELECT * FROM usuario WHERE email = ?", "highlightIndex": 0 }
+      },
+      {
+        "id": "s7", "from": "usuarioService", "to": "usuarioService", "label": "rawPassword.equals(encodedPassword)", "kind": "code",
+        "title": "Comprobación de la contraseña",
+        "explanation": "Descifra la contraseña guardada con cryptComponent y la compara con la recibida. Si no coincide lanza FreeSocialException(\"error.login\").",
+        "ref": { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Service/UsuarioService/UsuarioServiceImpl.java", "line": 174, "anchor": "if ( isRegistering || rawPassword.equals(encodedPassword)) {", "className": "UsuarioServiceImpl", "functionName": "authenticate" },
+        "snippet": null
+      },
+      {
+        "id": "s8", "from": "usuarioService", "to": "db", "label": "usuarioRepository.save(usuario)", "kind": "sql",
+        "title": "Actualiza último login",
+        "explanation": "Guarda la fecha de último login y la preferencia «recordado» del usuario.",
+        "ref": { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Service/UsuarioService/UsuarioServiceImpl.java", "line": 178, "anchor": "usuarioRepository.save(usuario);", "className": "UsuarioServiceImpl", "functionName": "authenticate" },
+        "snippet": null,
+        "generatedCode": { "title": "SQL", "language": "sql", "code": "UPDATE usuario SET ultimo_login = ?, recordado = ? WHERE id = ?", "highlightIndex": 0 }
+      },
+      {
+        "id": "s9", "from": "controller", "to": "inicio", "label": "200 { token }", "kind": "code",
+        "title": "Respuesta con el token",
+        "explanation": "El servicio genera el JWT y el controlador responde 200 con { token }. InicioComponent lo guarda en localStorage y navega a /home.",
+        "ref": { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Controller/UsuarioController/UsuarioController.java", "line": 96, "anchor": "return ResponseEntity.ok(Collections.singletonMap(\"token\", dto.getToken()));", "className": "UsuarioController", "functionName": "loginUser" },
+        "snippet": null
+      }
+    ],
+    "errorExits": [
+      { "stepId": "s1", "condition": "Formulario de login no válido" },
+      { "stepId": "s4", "httpStatus": 400, "condition": "No existe usuario con ese email" },
+      { "stepId": "s7", "condition": "La contraseña no coincide (error.login)" }
+    ],
+    "inputExample": { "email": "ana@freesocial.com", "password": "Secreta123", "recordado": false },
+    "simulationPresets": [
+      { "id": "ok", "label": "Credenciales válidas", "input": { "email": "ana@freesocial.com", "password": "Secreta123", "recordado": false }, "expected": { "kind": "ok", "failStepId": null, "httpStatus": 200 } },
+      { "id": "bad-pass", "label": "Contraseña incorrecta", "input": { "email": "ana@freesocial.com", "password": "otraClave", "recordado": false }, "expected": { "kind": "error", "failStepId": "s7" } },
+      { "id": "no-user", "label": "Usuario inexistente", "input": { "email": "nadie@freesocial.com", "password": "Secreta123", "recordado": false }, "expected": { "kind": "error", "failStepId": "s4", "httpStatus": 400 } },
+      { "id": "empty", "label": "Formulario vacío", "input": { "email": "", "password": "", "recordado": false }, "expected": { "kind": "stop", "failStepId": "s1" } }
+    ],
+    "files": [
+      { "mountId": "", "file": "FreeSocial/src/app/Components/Inicio/inicio/inicio.component.ts", "line": 450, "anchor": "public onLogin(): void {", "className": "InicioComponent", "functionName": "onLogin" },
+      { "mountId": "", "file": "FreeSocial/src/app/Service/Login/login.service.ts", "line": 15, "anchor": "public login(data: LoginRequest): Observable<any> {", "className": "LoginService", "functionName": "login" },
+      { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Controller/UsuarioController/UsuarioController.java", "line": 85, "anchor": "public ResponseEntity<?> loginUser(@Validated @RequestBody LoginRequest usuarioDTO, BindingResult result) {", "className": "UsuarioController", "functionName": "loginUser" },
+      { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Service/UsuarioService/UsuarioServiceImpl.java", "line": 169, "anchor": "public ResponseDTO authenticate(LoginRequest usuarioDTO, boolean isRegistering) {", "className": "UsuarioServiceImpl", "functionName": "authenticate" },
+      { "mountId": "", "file": "freesocialBack/src/main/java/com/FreeSocial/com/Repository/UsuarioRepository.java", "line": 14, "anchor": "public interface UsuarioRepository extends JpaRepository<UsuarioEntity,Long> {", "className": "UsuarioRepository", "functionName": "findByEmail" }
+    ],
+    "model": "Ejemplo (manual)",
+    "generatedAt": "2026-10-25T12:00:00.000Z"
+  },
+  "proposals": [
+    {
+      "id": "freesocial-null-user",
+      "flowId": "freesocial-login",
+      "request": "Evitar el NullPointerException en authenticate() cuando el email no existe.",
+      "title": "Comprobar usuario nulo en authenticate()",
+      "summary": "Si findByEmail() devuelve null, authenticate() lanza «error.login» en vez de fallar con NullPointerException y acabar en «error.unknown».",
+      "risks": ["El registro (isRegistering) también pasa por aquí; con un usuario recién guardado nunca es null."],
+      "status": "pending",
+      "createdAt": "2026-10-25T12:00:00.000Z",
+      "files": [
+        {
+          "mountId": "",
+          "path": "freesocialBack/src/main/java/com/FreeSocial/com/Service/UsuarioService/UsuarioServiceImpl.java",
+          "status": "modified",
+          "note": "usuario puede ser null",
+          "baseHash": null,
+          "additions": 3,
+          "deletions": 0,
+          "hunks": [
+            {
+              "header": "@@ authenticate()",
+              "oldStart": 171,
+              "newStart": 171,
+              "lines": [
+                { "kind": "context", "oldLine": 171, "newLine": 171, "text": "            UsuarioEntity usuario = usuarioRepository.findByEmail(usuarioDTO.getEmail());" },
+                { "kind": "add", "oldLine": null, "newLine": 172, "text": "            if (usuario == null) {" },
+                { "kind": "add", "oldLine": null, "newLine": 173, "text": "                throw new FreeSocialException(\"error.login\");" },
+                { "kind": "add", "oldLine": null, "newLine": 174, "text": "            }" },
+                { "kind": "context", "oldLine": 172, "newLine": 175, "text": "            String rawPassword = usuarioDTO.getPassword();" }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
