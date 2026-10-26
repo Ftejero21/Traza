@@ -16,7 +16,7 @@ import {
   SimulationResult,
 } from '../ai/nexo-ia.types';
 import { functionLabel, isDecoratorFunctionName, refSymbolLabel } from '../ai/workspace-code-flow-ref-validator';
-import { FlowStatusPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
+import { FlowStatusPill, SavedResultPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
 import { UiScreenView, UiViewportId, WorkspaceCodeAiUiPreviewService } from '../services/workspace-code-ai-ui-preview.service';
 import { WorkspaceCodeNotifyService } from '../services/workspace-code-notify.service';
 import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
@@ -312,6 +312,23 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
 
   get pill(): FlowStatusPill {
     return this.flowService.statusPill();
+  }
+
+  /** Resultados guardados de Simular datos / Analizar logs (solo en el Recorrido). */
+  get savedPills(): SavedResultPill[] {
+    return this.flowService.savedResultPills();
+  }
+
+  savedFailMark(i: number): 'danger' | 'warning' | null {
+    return this.flowService.savedFailMark(i);
+  }
+
+  openSaved(mode: 'sim' | 'logs'): void {
+    this.flowService.setMode(mode);
+  }
+
+  trackSaved(_: number, p: SavedResultPill): string {
+    return p.mode;
   }
 
   get fileCount(): number {

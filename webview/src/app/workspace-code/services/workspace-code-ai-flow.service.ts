@@ -181,6 +181,21 @@ export interface FlowStatusPill {
   prefix?: string;
 }
 
+/** Vista de un resultado de Simular datos / Analizar logs, guardada en memoria al salir de su pestaña. */
+interface SavedDiagnosisView {
+  result: SimulationResult | LogAnalysisResult;
+  source: FlowResultSource | null;
+  snippet: SnippetView | null;
+  revealedFor: string | null;
+  labHeight: number | null;
+  labFrozen: boolean;
+}
+
+export interface SavedResultPill {
+  mode: 'sim' | 'logs';
+  pill: FlowStatusPill;
+}
+
 function emptyUi(): FlowUiState {
   return {
     mode: 'walk', step: 0, playing: false, speed: 1, labHeight: null, labPane: 'data',
@@ -218,6 +233,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Modo «Base de datos»: esquema y guion listos para pintar. */
   dbView: FlowDbView | null = null;
 
+  /** Resultado de cada modo guardado al cambiar de pestaña (solo en memoria; se vacía en `open()`). */
+  private savedViews: { sim?: SavedDiagnosisView; logs?: SavedDiagnosisView } = {};
   private lastOperation: 'sim' | 'logs' | null = null;
   /** La altura del validador la fijó la llegada del resultado (no el usuario con el separador). */
   private labFrozen = false;
@@ -298,6 +315,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       changeBusy: keep?.changeBusy ?? false,
     };
     this.resultSnippet = null;
+    this.savedViews = {};
     this.logsNotice = null;
     this.player.runWalk(sanitized.steps.length);
     this.player.select(step);
@@ -376,10 +394,26 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     // Salir del modo «Base de datos» cancela la carga del mapa.
     if (this.ui.mode === 'db') this.stopDbRequest();
     this.cancelSequence();
-    this.clearResult();
+    // Cada modo conserva su resultado: se guarda su vista antes de limpiar los campos compartidos.
+    const previous = this.ui.mode;
+    if (previous === 'sim' || previous === 'logs') {
+      const current = this.result;
+      if (current) {
+        this.savedViews[previous] = {
+          result: current,
+          source: this.ui.resultSource,
+          snippet: this.resultSnippet,
+          revealedFor: this.ui.revealedFor,
+          labHeight: this.ui.labHeight,
+          labFrozen: this.labFrozen,
+        };
+      }
+    }
+    this.detachResult();
     // La comparación de Simular cambios se conserva entre modos.
     this.ui = { ...this.ui, mode, labPane: 'data', labHeight: null, error: null, errorAction: null };
     this.player.runWalk(this.flow?.steps.length ?? 0);
+    if (mode === 'sim' || mode === 'logs') this.restoreResult(mode);
     if (mode === 'changes' && this.ui.changeCase && this.caseData(this.ui.changeCase)) this.selectCase(this.ui.changeCase);
     this.emit();
     if (mode === 'db') void this.loadDbMap();
@@ -414,6 +448,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Tras aplicar o deshacer un cambio, los resultados de Simular datos ya no corresponden al código. */
   clearSimResults(): void {
     if (this.ui.mode === 'sim') this.clearResult();
+    delete this.savedViews.sim;
     this.ui = { ...this.ui, simResult: null };
     this.emit();
   }
@@ -444,16 +479,80 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.emit();
   }
 
-  /** Cambiar datos, preset o modo borra el resultado anterior y para el reproductor. */
+  /**
+   * Cambiar los datos o aplicar un preset borra el resultado del modo actual (el de Simular datos o el de Analizar
+   * logs; en otros modos, ambos) y para el reproductor. El resultado del otro modo se conserva.
+   */
   private clearResult(): void {
+    this.detachResult();
+    const mode = this.ui.mode;
+    if (mode === 'sim') {
+      this.ui = { ...this.ui, simResult: null };
+      delete this.savedViews.sim;
+    } else if (mode === 'logs') {
+      this.ui = { ...this.ui, logsResult: null, pre: null };
+      delete this.savedViews.logs;
+    } else {
+      this.ui = { ...this.ui, simResult: null, logsResult: null, pre: null };
+      this.savedViews = {};
+    }
+  }
+
+  /** Quita de la vista el resultado visible (cancela la petición y para el reproductor) sin borrar los resultados de cada modo. */
+  private detachResult(): void {
     this.cancelRequest();
-    this.ui = { ...this.ui, simResult: null, logsResult: null, pre: null, resultVisible: false, busy: false, error: null, errorAction: null, revealedFor: null, resultSource: null };
+    this.ui = { ...this.ui, resultVisible: false, busy: false, error: null, errorAction: null, revealedFor: null, resultSource: null };
     if (this.labFrozen) {
       this.labFrozen = false;
       this.ui = { ...this.ui, labHeight: null };
     }
     this.resultSnippet = null;
     this.player.reset();
+  }
+
+  /** Vuelve a un modo con resultado guardado: lo muestra tal cual, al final del recorrido, sin animación ni petición. */
+  private restoreResult(kind: 'sim' | 'logs'): void {
+    const r = kind === 'sim' ? this.ui.simResult : this.ui.logsResult;
+    if (!r || !this.flow) return;
+    const saved = this.savedViews[kind];
+    const view = saved && saved.result === r ? saved : null;
+    this.resultSnippet = view?.snippet ?? null;
+    this.labFrozen = view?.labFrozen ?? false;
+    this.ui = { ...this.ui, resultSource: view?.source ?? null, revealedFor: view?.revealedFor ?? null, labHeight: view?.labHeight ?? null };
+    this.player.showResultNow(() => {
+      this.ui = { ...this.ui, resultVisible: true, labPane: 'result' };
+    });
+    this.player.select(this.targetOf(r, kind) ?? 0);
+  }
+
+  /** Un chip por resultado guardado de Simular datos / Analizar logs; solo se muestran en el modo Recorrido. */
+  savedResultPills(): SavedResultPill[] {
+    if (this.ui.mode !== 'walk' || !this.flow) return [];
+    const total = this.flow.steps.length;
+    const out: SavedResultPill[] = [];
+    const build = (mode: 'sim' | 'logs', r: FlowDiagnosis | null): void => {
+      if (!r) return;
+      const fail = this.failIndexOf(r);
+      let pill: FlowStatusPill;
+      if (fail >= 0) {
+        pill = r.kind === 'stop'
+          ? { tone: 'warning', key: 'aiFlow.pill.stop', params: { n: fail + 1 } }
+          : { tone: 'danger', key: 'aiFlow.pill.fail', params: { n: fail + 1 } };
+      } else if (r.kind === 'ok') pill = { tone: 'success', key: 'aiFlow.pill.ok', params: { n: total, total } };
+      else pill = { tone: 'accent', key: 'aiFlow.pill.none', params: {} };
+      out.push({ mode, pill });
+    };
+    build('sim', this.ui.simResult);
+    build('logs', this.ui.logsResult);
+    return out;
+  }
+
+  /** Marca del número de paso en el Recorrido: el que falla o se detiene según el resultado guardado (simulación; si no, logs). */
+  savedFailMark(i: number): 'danger' | 'warning' | null {
+    if (this.ui.mode !== 'walk') return null;
+    const r = this.ui.simResult ?? this.ui.logsResult;
+    if (!r || this.failIndexOf(r) !== i) return null;
+    return r.kind === 'stop' ? 'warning' : 'danger';
   }
 
   /* ---------------------------- simular ---------------------------- */
@@ -524,7 +623,15 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       this.labFrozen = false;
       this.ui = { ...this.ui, labHeight: null };
     }
-    this.ui = { ...this.ui, busy: true, error: null, errorAction: null, simError: null, simResult: null, logsResult: null, resultVisible: false, resultSource: null };
+    // Solo se borra el resultado de su tipo: el del otro modo se conserva.
+    if (kind === 'simulate') {
+      this.ui = { ...this.ui, simResult: null };
+      delete this.savedViews.sim;
+    } else {
+      this.ui = { ...this.ui, logsResult: null };
+      delete this.savedViews.logs;
+    }
+    this.ui = { ...this.ui, busy: true, error: null, errorAction: null, simError: null, resultVisible: false, resultSource: null };
     this.resultSnippet = null;
     this.emit();
 
@@ -1442,7 +1549,10 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   }
 
   failIndex(): number {
-    const r = this.result;
+    return this.failIndexOf(this.result);
+  }
+
+  private failIndexOf(r: FlowDiagnosis | null): number {
     if (!r || !this.flow || !r.failStepId || (r.kind !== 'error' && r.kind !== 'stop')) return -1;
     return this.flow.steps.findIndex((s) => s.id === r.failStepId);
   }

@@ -24,7 +24,15 @@
   background: transparent; color: var(--wce-muted); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 .wcf__mode:hover { background: var(--wce-hover); color: var(--wce-text); }
 .wcf__mode.is-on { background: var(--wce-accent-soft); border-color: var(--wce-accent-strong); color: var(--wce-accent-text); }
-.wcf__mode:focus-visible, .wcf-btn:focus-visible, .wcf-run:focus-visible, .wcf-ctrl:focus-visible, .wcf-play:focus-visible, .wcf-seg:focus-visible,
+/* Resultados guardados (Recorrido) */
+.wcf__saved { flex: none; display: flex; gap: 6px; padding: calc(6px * var(--wce-pad)) calc(18px * var(--wce-pad)); border-bottom: 1px solid var(--wce-border); background: var(--wce-surface); overflow-x: auto; scrollbar-width: none; }
+.wcf__saved-chip { flex: none; display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 9px; border-radius: 999px; font: inherit; font-size: 11px; font-weight: 700;
+  border: 1px solid var(--wce-accent-strong); background: var(--wce-accent-soft); color: var(--wce-accent-text); white-space: nowrap; cursor: pointer; }
+.wcf__saved-chip:hover { filter: brightness(1.08); }
+.wcf__saved-chip[data-tone='danger'] { border-color: var(--wce-danger-border); background: var(--wce-danger-soft); color: var(--wce-danger-text); }
+.wcf__saved-chip[data-tone='warning'] { border-color: var(--wce-warning-border); background: var(--wce-warning-soft); color: var(--wce-warning-text); }
+.wcf__saved-chip[data-tone='success'] { border-color: var(--wce-success-border); background: var(--wce-success-soft); color: var(--wce-success-text); }
+.wcf__mode:focus-visible, .wcf__saved-chip:focus-visible, .wcf-btn:focus-visible, .wcf-run:focus-visible, .wcf-ctrl:focus-visible, .wcf-play:focus-visible, .wcf-seg:focus-visible,
 .wcf-speed button:focus-visible, .wcf-preset:focus-visible, .wcf-tabs button:focus-visible { outline: 2px solid var(--wce-accent); outline-offset: 1px; }
 
 /* ---------------- Zona central ---------------- */
@@ -63,6 +71,9 @@
 /* Zona del número (34×34, centrada en el mismo punto que el círculo): abre el menú de acciones del paso. */
 .wcf-num-hit { position: absolute; left: 2px; top: 13px; width: 34px; height: 34px; display: grid; place-items: center; z-index: 3; }
 .wcf-num-hit .wcf-num { position: static; box-sizing: border-box; }
+/* Marca del paso que falla o se detiene según el resultado guardado (Recorrido). */
+.wcf-num-mark { position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; box-sizing: content-box; border-radius: 50%; border: 1.5px solid var(--wce-surface); background: var(--wce-danger); pointer-events: none; z-index: 4; }
+.wcf-num-mark[data-tone='warning'] { background: var(--wce-warning); }
 .wcf-rows.has-menu { z-index: 6; }
 .wcf-row.is-menu { z-index: 6; }
 .wcf-row.is-menu .wcf-num { box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.45); }

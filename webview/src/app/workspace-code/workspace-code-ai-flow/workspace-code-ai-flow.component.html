@@ -21,6 +21,15 @@
     </button>
   </div>
 
+  <!-- Resultados guardados de Simular datos / Analizar logs (solo en el Recorrido) -->
+  <div class="wcf__saved" *ngIf="flowService.ui.mode === 'walk' && savedPills.length">
+    <button *ngFor="let p of savedPills; trackBy: trackSaved" type="button" class="wcf__saved-chip" [attr.data-tone]="p.pill.tone"
+      [attr.aria-label]="'aiFlow.saved.aria' | wcT: { mode: ('aiFlow.mode.' + p.mode | wcT) }" (click)="openSaved(p.mode)">
+      <i class="bi" [ngClass]="p.pill.tone === 'danger' ? 'bi-x-octagon-fill' : p.pill.tone === 'warning' ? 'bi-pause-circle-fill' : p.pill.tone === 'success' ? 'bi-check-circle-fill' : 'bi-signpost-split'" aria-hidden="true"></i>
+      {{ ('aiFlow.saved.' + p.mode) | wcT }}: {{ p.pill.key | wcT: p.pill.params }} · {{ 'aiFlow.saved.view' | wcT }}
+    </button>
+  </div>
+
   <div class="wcf__main" #main>
     <!-- Diagrama de secuencia -->
     <div class="wcf__diagram" #diagram *ngIf="flowService.ui.mode !== 'db'">
@@ -39,6 +48,7 @@
             [class.is-logs]="inLogs(i)" [class.is-menu]="stepMenu === i" (click)="onStep($event)">
             <span class="wcf-num-hit" (mouseenter)="openStepMenu(i)" (mouseleave)="scheduleStepMenuClose()">
               <span class="wcf-num">{{ stepNumberText(i) }}</span>
+              <span class="wcf-num-mark" *ngIf="savedFailMark(i) as m" [attr.data-tone]="m" aria-hidden="true"></span>
             </span>
             <!-- Menú de acciones del paso (se abre al pasar el ratón por el número) -->
             <div class="wcf-stepmenu" *ngIf="stepMenu === i" role="menu"
