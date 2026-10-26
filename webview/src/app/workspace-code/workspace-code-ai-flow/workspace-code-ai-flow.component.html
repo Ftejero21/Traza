@@ -247,9 +247,15 @@
               <span class="wcf-input__spacer"></span>
               <button type="button" class="wcf-btn wcf-btn--ghost" (click)="flowService.resetInput()"><i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i>{{ 'aiFlow.reset' | wcT }}</button>
             </div>
-            <div class="wcf-presets" *ngIf="flowService.ui.mode === 'sim' && f.simulationPresets.length">
-              <button *ngFor="let p of f.simulationPresets" type="button" class="wcf-preset" [class.is-on]="flowService.ui.simPreset === p.id"
-                [title]="p.label" (click)="flowService.applyPreset(p.id)">{{ p.label }}</button>
+            <div class="wcf-presets" role="group" [attr.aria-label]="'aiFlow.presets' | wcT" *ngIf="flowService.ui.mode === 'sim' && f.simulationPresets.length">
+              <button *ngFor="let p of visiblePresets(f.simulationPresets); trackBy: trackPreset" type="button" class="wcf-preset" [class.is-on]="flowService.ui.simPreset === p.id"
+                [attr.aria-pressed]="flowService.ui.simPreset === p.id" [title]="p.label" (click)="flowService.applyPreset(p.id)">
+                <i class="bi bi-check2" aria-hidden="true" *ngIf="flowService.ui.simPreset === p.id"></i><span class="wcf-preset__label">{{ p.label }}</span>
+              </button>
+              <button type="button" class="wcf-preset wcf-preset--more" *ngIf="hasPresetOverflow(f.simulationPresets) && (presetsExpanded || hiddenPresetCount(f.simulationPresets) > 0)"
+                [attr.aria-expanded]="presetsExpanded" (click)="togglePresets()">
+                <span class="wcf-preset__label">{{ presetsExpanded ? ('aiFlow.presets.less' | wcT) : ('aiFlow.presets.more' | wcT: { n: hiddenPresetCount(f.simulationPresets) }) }}</span>
+              </button>
             </div>
             <textarea class="wcf-input__area" spellcheck="false" [rows]="inputRows" [value]="inputText" (input)="onInput($event)"
               [placeholder]="(flowService.ui.mode === 'logs' ? 'aiFlow.placeholder.logs' : 'aiFlow.placeholder.sim') | wcT"

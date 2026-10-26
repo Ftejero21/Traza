@@ -12,6 +12,7 @@ import {
   LogAnalysisResult,
   LogEvidence,
   ResultKind,
+  SimulationPreset,
   SimulationResult,
 } from '../ai/nexo-ia.types';
 import { functionLabel, isDecoratorFunctionName, refSymbolLabel } from '../ai/workspace-code-flow-ref-validator';
@@ -22,6 +23,9 @@ import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
 import { NexoBridge } from '../../bridge/nexo-bridge';
 
 const NARROW_WIDTH = 600;
+/** Casos predefinidos visibles con la lista recogida (ancho / estrecho). */
+const PRESETS_COLLAPSED_WIDE = 6;
+const PRESETS_COLLAPSED_NARROW = 4;
 const LAB_MIN = 120;
 const DIAGRAM_MIN = 80;
 /** Vista de pantalla: ancho del popup en carga/error, margen lateral, alto mínimo libre encima y separación con la fila. */
@@ -86,6 +90,34 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   private zoomWasOpen = false;
 
   narrow = false;
+  /** Casos predefinidos: lista completa (true) o recogida con «+N más». */
+  presetsExpanded = false;
+
+  private get presetLimit(): number {
+    return this.narrow ? PRESETS_COLLAPSED_NARROW : PRESETS_COLLAPSED_WIDE;
+  }
+
+  visiblePresets(list: SimulationPreset[]): SimulationPreset[] {
+    const limit = this.presetLimit;
+    if (this.presetsExpanded || list.length <= limit) return list;
+    return list.filter((p: SimulationPreset, i: number) => i < limit || p.id === this.flowService.ui.simPreset);
+  }
+
+  hiddenPresetCount(list: SimulationPreset[]): number {
+    return list.length - this.visiblePresets(list).length;
+  }
+
+  hasPresetOverflow(list: SimulationPreset[]): boolean {
+    return list.length > this.presetLimit;
+  }
+
+  togglePresets(): void {
+    this.presetsExpanded = !this.presetsExpanded;
+  }
+
+  trackPreset(_: number, p: SimulationPreset): string {
+    return p.id;
+  }
   /** Paso con el menú de acciones abierto (`null` = ninguno). */
   stepMenu: number | null = null;
   private stepMenuTimer: ReturnType<typeof setTimeout> | null = null;

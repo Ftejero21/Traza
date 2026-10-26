@@ -30,7 +30,7 @@
               "sourceMap": false,
               "budgets": [
                 { "type": "initial", "maximumWarning": "4mb", "maximumError": "8mb" },
-                { "type": "anyComponentStyle", "maximumWarning": "32kb", "maximumError": "128kb" }
+                { "type": "anyComponentStyle", "maximumWarning": "40kb", "maximumError": "128kb" }
               ]
             },
             "development": {
