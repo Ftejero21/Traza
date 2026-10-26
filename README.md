@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/chat-nexo.webp" alt="@traza genera el flujo del login desde el chat de VS Code" width="900">
+  <img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/chat-nexo.webp" alt="@traza genera el flujo del login desde el chat de VS Code" width="900">
 </p>
 
 ---
@@ -49,13 +49,13 @@ Todo funciona **sin servidor propio**: la IA es el modelo que tengas configurado
 
 ### ▶️ Recorrido
 
-<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/recorrido.webp" alt="Recorrido animado del login de FreeSocial" width="900"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/recorrido.webp" alt="Recorrido animado del login de FreeSocial" width="900"></p>
 
 El flujo se reproduce paso a paso: quién llama a quién, con qué datos y en qué línea. Debajo ves el fragmento de código real del paso. Con **Abrir en el editor** saltas a esa línea. Puedes pausar, avanzar con ← y → o cambiar la velocidad (0,5× · 1× · 2×).
 
 ### 🧪 Simular datos
 
-<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/simular-datos.webp" alt="Simulación de contraseña incorrecta que falla en el paso 7" width="900"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/simular-datos.webp" alt="Simulación de contraseña incorrecta que falla en el paso 7" width="900"></p>
 
 Elige uno de los escenarios que propone la IA o edita el JSON de entrada y pulsa **Simular con estos datos**. El recorrido avanza hasta el paso donde el caso se detiene. La tarjeta de resultado explica:
 
@@ -68,25 +68,25 @@ En el ejemplo, una contraseña incorrecta en FreeSocial no termina en un aviso d
 
 ### 🖥️ Vista de pantalla
 
-<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/vista-previa.webp" alt="Visualizar pantalla del componente de login, antes y con el cambio" width="900"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/vista-previa.webp" alt="Visualizar pantalla del componente de login, antes y con el cambio" width="900"></p>
 
 Desde el menú de cualquier paso (pasa el ratón por su número) elige **Visualizar pantalla**. Traza reconstruye el componente real (plantilla y estilos) y marca lo que ve el usuario en ese escenario. Si hay un cambio propuesto, alterna entre **Ahora** y **Con el cambio**.
 
 ### 📜 Analizar logs
 
-<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/analizar-logs.png" alt="Pestaña Analizar logs" width="900"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/analizar-logs.png" alt="Pestaña Analizar logs" width="900"></p>
 
 Pega los logs del navegador o del servidor y pulsa **Analizar logs**. Traza cruza las trazas con los pasos del flujo, marca **● en logs** los pasos que aparecen y señala el que falla con las evidencias. Los datos sensibles se ocultan antes de enviarlos.
 
 ### 🗄️ Base de datos
 
-<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/base-de-datos.webp" alt="Mapa de datos: SELECT y UPDATE sobre la tabla usuario" width="900"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/base-de-datos.webp" alt="Mapa de datos: SELECT y UPDATE sobre la tabla usuario" width="900"></p>
 
 El diagrama de tablas se recorre al ritmo del flujo. En cada acceso ves la operación (`SELECT`, `UPDATE`…), las columnas y de dónde sale cada valor (`email ← usuarioDTO.email`). Sin conexión se deduce del código. Con una conexión configurada se usa **el esquema real**, del que solo se lee la metadata.
 
 ### 🔀 Simular cambios
 
-<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/nexo-vscode/main/media/simular-cambios.webp" alt="Simular antes y después de un cambio propuesto" width="900"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/simular-cambios.webp" alt="Simular antes y después de un cambio propuesto" width="900"></p>
 
 A la izquierda, el diff del cambio propuesto. A la derecha, **Simular cambios** ejecuta todos los escenarios antes y después y los clasifica en **arreglados**, **mejoran el aviso**, **sin cambios** y **regresiones**. **Simular antes y después** reproduce las dos versiones seguidas. **Aplicar** escribe el cambio en tus archivos solo cuando tú lo confirmas, y **Deshacer** lo revierte.
 
@@ -202,6 +202,6 @@ Un `*.flow.json` tiene la forma `{ "flow": FlowDiagram, "proposals"?: [...] }`. 
 - `steps[]`: los pasos, con `from`, `to`, `label`, `kind`, `title`, `explanation` y `ref { file, line, anchor }`;
 - `simulationPresets[]`: los escenarios de **Simular datos**.
 
-Límites: 2 MB y 10 propuestas. Ejemplo completo: [samples/freesocial-login.flow.json](https://github.com/Ftejero21/nexo-vscode/blob/main/samples/freesocial-login.flow.json).
+Límites: 2 MB y 10 propuestas. Ejemplo completo: [samples/freesocial-login.flow.json](https://github.com/Ftejero21/Traza/blob/main/samples/freesocial-login.flow.json).
 
 <p align="center"><sub>Las capturas son del proyecto de ejemplo FreeSocial (Angular + Spring Boot) con Claude a través de GitHub Copilot.</sub></p>
