@@ -14,6 +14,7 @@ import {
   ResultKind,
   SimulationResult,
 } from '../ai/nexo-ia.types';
+import { functionLabel, isDecoratorFunctionName, refSymbolLabel } from '../ai/workspace-code-flow-ref-validator';
 import { FlowStatusPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
 import { UiScreenView, UiViewportId, WorkspaceCodeAiUiPreviewService } from '../services/workspace-code-ai-ui-preview.service';
 import { WorkspaceCodeNotifyService } from '../services/workspace-code-notify.service';
@@ -337,9 +338,23 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     return this.flowService.inLogs(index);
   }
 
+  /** `nombre()` o `@Decorador` (sin paréntesis). */
+  fnLabel(fn: string): string {
+    return functionLabel(fn);
+  }
+
+  /** `Clase.función()` o `Clase @Decorador`. */
+  refSymbol(ref: CodeRef): string {
+    return refSymbolLabel(ref);
+  }
+
+  isDeco(fn: string): boolean {
+    return isDecoratorFunctionName(fn);
+  }
+
   refLabel(ref: CodeRef | null, withFile = false): string {
     if (!ref) return '';
-    const fn = `${ref.className}.${ref.functionName}()`;
+    const fn = refSymbolLabel(ref);
     if (!withFile) return `${fn} · L${ref.line}`;
     const file = ref.file.slice(ref.file.lastIndexOf('/') + 1);
     return `${fn} · ${file}:${ref.line}`;

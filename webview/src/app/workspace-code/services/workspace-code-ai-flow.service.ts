@@ -25,7 +25,7 @@ import {
 import { CaseComparison, ChangeCompareResponse, ChangeProposal, DiffHunk, FileChange } from '../ai/nexo-ia.changes.types';
 import { applyFileChange, caseTouchedByChange, compareTag, resolveChangeTarget, sortCases } from '../ai/workspace-code-ai-change-patch';
 import { maskConfigSecrets, maskSensitiveJson } from '../ai/workspace-code-ai-mask';
-import { FlowRefValidator, refKey } from '../ai/workspace-code-flow-ref-validator';
+import { FlowRefValidator, isDecoratorFunctionName, refKey } from '../ai/workspace-code-flow-ref-validator';
 import { WorkspaceCodeFlowPlayer } from '../ai/workspace-code-flow-player';
 import { sanitizeDiagnosis, sanitizeFlowDbMap, sanitizeFlowDiagram } from '../ai/workspace-code-flow-sanitize';
 import { buildFlowDbSchema, buildFlowDbScript, candidateTableNames, dbStepIndexes, flowHasDb, isDbStep, repositoryEntities } from '../ai/workspace-code-flow-db';
@@ -1437,7 +1437,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     if (!step) return '';
     const ref = step.ref;
     if (!ref) return `${index + 1}. ${step.title}`;
-    return `${ref.className}.${ref.functionName} · ${ref.file}:${ref.line}`;
+    const sym = isDecoratorFunctionName(ref.functionName) ? `${ref.className} ${ref.functionName}` : `${ref.className}.${ref.functionName}`;
+    return `${sym} · ${ref.file}:${ref.line}`;
   }
 
   failIndex(): number {

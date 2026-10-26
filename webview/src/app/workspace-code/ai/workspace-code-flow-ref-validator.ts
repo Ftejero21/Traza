@@ -30,9 +30,30 @@ const NO_CLASS_LANGS = new Set(['html', 'htm', 'sql', 'xml', 'json', 'yml', 'yam
 /** Plantillas, estilos y datos: no tienen funciones, así que `functionName` («template», «styles»…) no se busca en el texto. */
 const NO_FUNCTION_LANGS = new Set(['html', 'htm', 'css', 'scss', 'sass', 'less', 'xml', 'json', 'yml', 'yaml', 'properties']);
 const BRACE_LANGS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'java', 'kt', 'kts', 'cs', 'go', 'scala', 'swift', 'dart', 'php', 'c', 'cpp', 'h', 'hpp', 'rs']);
+/** Máximo de líneas que se escanean para un decorador/anotación de clase (y hacia arriba buscando su inicio). */
+const MAX_DECORATOR_LINES = 200;
+/** Líneas que se miran tras un decorador para encontrar la declaración de la clase. */
+const CLASS_LOOKAHEAD_LINES = 30;
+const CLASS_DECL = /(?:^|[\s(])(?:class|interface|enum|record|struct|object)\s+([A-Za-z_$][\w$]*)/;
+const DECORATOR_START = /^\s*(?:export\s+)?@([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)/;
 
 export function refKey(ref: Pick<CodeRef, 'mountId' | 'file'>): string {
   return `${ref.mountId}\u0000${ref.file}`;
+}
+
+/** `functionName` de un decorador o anotación de clase (`@Component`). */
+export function isDecoratorFunctionName(fn: string | null | undefined): boolean {
+  return /^@/.test(String(fn ?? '').trim());
+}
+
+/** Etiqueta de la función: `@Component` tal cual; el resto como `nombre()`. */
+export function functionLabel(fn: string): string {
+  return isDecoratorFunctionName(fn) ? fn : `${fn}()`;
+}
+
+/** Etiqueta de símbolo: `Clase @Decorador` o `Clase.funcion()`. */
+export function refSymbolLabel(ref: Pick<CodeRef, 'className' | 'functionName'>): string {
+  return isDecoratorFunctionName(ref.functionName) ? `${ref.className} ${ref.functionName}` : `${ref.className}.${ref.functionName}()`;
 }
 
 function norm(text: string): string {
@@ -53,7 +74,9 @@ function lineMatches(line: string | undefined, anchor: string): boolean {
 /**
  * Valida cada `CodeRef` de la IA contra el archivo real antes de mostrarla: el archivo existe (y está permitido), la
  * línea contiene `anchor` (o se corrige buscándolo cerca y en todo el archivo), la clase y la función aparecen en el
- * archivo y la línea cae dentro del cuerpo de la función. Los fragmentos se vuelven a leer siempre del archivo real.
+ * archivo y la línea cae dentro del cuerpo de la función. Una línea dentro de los argumentos de un decorador o anotación
+ * de clase (`@Component({...})`, `@RequestMapping(...)`) se acepta con `functionName` = `@Decorador`. Los fragmentos se
+ * vuelven a leer siempre del archivo real.
  * Los archivos sensibles, excluidos o ignorados nunca se leen: sus referencias quedan `unverified`.
  */
 export class FlowRefValidator {
@@ -111,7 +134,7 @@ export class FlowRefValidator {
   /**
    * Comprueba y corrige una referencia. Si el archivo se puede leer, nunca confía en `verification` de entrada. Si el
    * archivo existe pero ahora no se puede leer (`unreadable`), conserva la verificación y la línea previas (o
-   * `unverified` si no había ninguna).
+   * `unverified` si no había ninguna). Los decoradores/anotaciones de clase se aceptan reescribiendo `functionName`.
    */
   async verify(input: CodeRef): Promise<VerifiedRef> {
     const previous = input.verification;
@@ -143,8 +166,17 @@ export class FlowRefValidator {
     }
     // Símbolos: la función (y la clase, salvo en lenguajes sin clases) deben aparecer en el archivo.
     if (verification !== 'unverified') {
-      const fnOk = NO_FUNCTION_LANGS.has(ext) || !!ref.functionName && new RegExp(`(^|[^\\w$])${escapeRe(ref.functionName)}([^\\w$]|$)`).test(text);
       const classOk = NO_CLASS_LANGS.has(ext) || (!!ref.className && new RegExp(`(^|[^\\w$])${escapeRe(ref.className)}([^\\w$]|$)`).test(text));
+      // Metadata de un decorador o anotación de clase: `functionName` pasa a ser `@Decorador`.
+      if (BRACE_LANGS.has(ext) && ref.className && classOk) {
+        const deco = this.classDecoratorAt(lines, line, ref.className);
+        if (deco) {
+          const short = deco.name.split('.').pop() ?? deco.name;
+          const asked = String(ref.functionName ?? '').trim().replace(/^@/, '').split('.').pop();
+          return { ref: { ...ref, line, functionName: `@${short}`, verification: asked === short ? verification : 'corrected' }, file, lines };
+        }
+      }
+      const fnOk = NO_FUNCTION_LANGS.has(ext) || !!ref.functionName && new RegExp(`(^|[^\\w$])${escapeRe(ref.functionName)}([^\\w$]|$)`).test(text);
       if (!fnOk || !classOk) verification = 'unverified';
     }
     // La línea tiene que caer dentro del cuerpo de la función (si su declaración se localiza).
@@ -161,6 +193,114 @@ export class FlowRefValidator {
       }
     }
     return { ref: { ...ref, line, verification }, file, lines };
+  }
+
+  /**
+   * Decorador/anotación de clase (`@Component({...})`, `@RequestMapping(...)`) cuyos argumentos contienen `line` y que
+   * precede a la declaración de `className` (o de cualquier clase si `className` no está declarada en el archivo).
+   * Los decoradores de método o propiedad devuelven `null`.
+   */
+  private classDecoratorAt(lines: string[], line: number, className: string): { name: string; start: number; end: number } | null {
+    if (line < 1 || line > lines.length) return null;
+    const namedExists = lines.some((l) => {
+      if (/^\s*(?:\/\/|\*|\/\*)/.test(l)) return false;
+      const m = l.match(CLASS_DECL);
+      return !!m && m[1] === className;
+    });
+    const lowest = Math.max(1, line - MAX_DECORATOR_LINES);
+    for (let s = line; s >= lowest; s--) {
+      const m = lines[s - 1].match(DECORATOR_START);
+      if (!m || m[1] === 'interface') continue;
+      const end = this.decoratorEnd(lines, s - 1, m[0].length);
+      if (!end || line > end.line) continue;
+      if (this.followedByClass(lines, end.line, end.col, className, namedExists)) return { name: m[1], start: s, end: end.line };
+      return null;
+    }
+    return null;
+  }
+
+  /**
+   * Fin del decorador que empieza en la línea `s0` (0-based), con `col` justo tras su nombre: línea (1-based) y columna
+   * donde se cierra el `)`. Sin `(` es un decorador sin argumentos. `null` si supera `MAX_DECORATOR_LINES`.
+   */
+  private decoratorEnd(lines: string[], s0: number, col: number): { line: number; col: number } | null {
+    const first = lines[s0];
+    let p = col;
+    while (p < first.length && /\s/.test(first[p])) p++;
+    if (first[p] !== '(') return { line: s0 + 1, col };
+    let depth = 0;
+    let quote = '';
+    let block = false;
+    let tick = false;
+    for (let i = s0; i < lines.length && i - s0 < MAX_DECORATOR_LINES; i++) {
+      const l = lines[i];
+      quote = '';
+      for (let c = i === s0 ? p : 0; c < l.length; c++) {
+        const ch = l[c];
+        if (block) {
+          if (ch === '*' && l[c + 1] === '/') {
+            block = false;
+            c++;
+          }
+          continue;
+        }
+        if (tick) {
+          if (ch === '\\') c++;
+          else if (ch === '`') tick = false;
+          continue;
+        }
+        if (quote) {
+          if (ch === '\\') c++;
+          else if (ch === quote) quote = '';
+          continue;
+        }
+        if (ch === '/' && l[c + 1] === '*') {
+          block = true;
+          c++;
+        } else if (ch === '/' && l[c + 1] === '/') {
+          break;
+        } else if (ch === '"' || ch === "'") {
+          quote = ch;
+        } else if (ch === '`') {
+          tick = true;
+        } else if (ch === '(') {
+          depth++;
+        } else if (ch === ')') {
+          depth--;
+          if (depth <= 0) return { line: i + 1, col: c + 1 };
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Tras el decorador (que acaba en `end`/`endCol`), la primera línea con contenido es la declaración de la clase. */
+  private followedByClass(lines: string[], end: number, endCol: number, className: string, namedExists: boolean): boolean {
+    let i = end - 1;
+    let from = endCol;
+    const limit = end - 1 + CLASS_LOOKAHEAD_LINES;
+    while (i < lines.length && i <= limit) {
+      const text = lines[i].slice(from);
+      const t = text.trim();
+      if (!t || t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) {
+        i++;
+        from = 0;
+        continue;
+      }
+      const dm = text.match(DECORATOR_START);
+      if (dm) {
+        if (dm[1] === 'interface') return false;
+        const e = this.decoratorEnd(lines, i, from + dm[0].length);
+        if (!e) return false;
+        i = e.line - 1;
+        from = e.col;
+        continue;
+      }
+      const cm = text.match(CLASS_DECL);
+      if (!cm) return false;
+      return namedExists ? cm[1] === className : true;
+    }
+    return false;
   }
 
   /** Busca `anchor` en ±30 líneas (la más cercana) y después en todo el archivo (única o la más cercana). */
