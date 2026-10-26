@@ -909,6 +909,8 @@ function setStyle(el: Element, name: string, value: string): void {
   }
 }
 
+const CHART_TYPE_RE = /^[a-z]{1,20}$/i;
+
 function bindProperty(el: Element, prop: string, expr: string, locals: Locals, run: Run): void {
   if (BOOL_PROPS.has(prop)) {
     const r = evalOrFlag(expr, locals, run);
@@ -961,6 +963,18 @@ function bindProperty(el: Element, prop: string, expr: string, locals: Locals, r
   if (prop === 'innerhtml' || prop === 'textcontent' || prop === 'innertext') {
     const r = evalOrFlag(expr, locals, run);
     el.textContent = r.ok ? toText(r.value) : '';
+    return;
+  }
+  if (el.localName === 'canvas' && (prop === 'type' || prop === 'charttype')) {
+    // Gráfico (Chart.js, ng2-charts…): solo se conserva el tipo, validado, para rotular el placeholder.
+    const r = evalOrFlag(expr, locals, run);
+    if (r.ok && typeof r.value === 'string' && CHART_TYPE_RE.test(r.value.trim())) el.setAttribute('data-nx-chart', r.value.trim());
+    return;
+  }
+  if (el.localName === 'canvas' && (prop === 'width' || prop === 'height')) {
+    const r = evalOrFlag(expr, locals, run);
+    const n = typeof r.value === 'number' ? r.value : typeof r.value === 'string' && r.value.trim() ? Number(r.value) : NaN;
+    if (r.ok && Number.isFinite(n) && n >= 1 && n <= 4000) el.setAttribute(prop, String(Math.round(n)));
     return;
   }
   if (prop === 'ngmodel' || prop === 'value') {
@@ -1110,6 +1124,31 @@ export function markAndDecorate(doc: Document, plan: Pick<UiPreviewPlan, 'state'
     body.appendChild(gap);
   }
   return { approximate };
+}
+
+/**
+ * Muestra abierto y estático el modal de Bootstrap (`.modal`) que contiene (o es) la raíz del plan o la marca, o que es
+ * lo único que hay en la plantilla del componente. Solo añade `show` y `data-nx-modal`; el CSS está en `NEXO_OVERLAY_CSS`.
+ */
+export function openModalsForPlan(doc: Document, rootSelector: string): void {
+  const body = doc.body;
+  let target: Element | null = null;
+  try {
+    target = body.querySelector(rootSelector);
+  } catch {
+    target = null;
+  }
+  const mark = body.querySelector('.nx');
+  const host = body.querySelector('[_nghost-nx-c0]') ?? body.firstElementChild;
+  const children = host ? Array.from(host.children).filter((c) => !c.classList.contains('nx-gap')) : [];
+  const only = children.length === 1 ? children[0] : null;
+  for (const modal of Array.from(body.querySelectorAll('.modal'))) {
+    const hit = (el: Element | null): boolean => !!el && (modal === el || modal.contains(el));
+    if (!hit(target) && !hit(mark) && modal !== only) continue;
+    modal.classList.add('show');
+    modal.setAttribute('data-nx-modal', '');
+    modal.removeAttribute('aria-hidden');
+  }
 }
 
 /* ============================================================
@@ -1434,6 +1473,56 @@ export function sanitizeFragmentDom(doc: Document): void {
   }
 }
 
+/** Icono estático del placeholder de gráfico (constante: nunca lleva datos del usuario). */
+const CHART_PLACEHOLDER_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" '
+  + 'stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><rect x="7" y="12" width="3" height="6" rx=".5"/>'
+  + '<rect x="12" y="8" width="3" height="10" rx=".5"/><rect x="17" y="5" width="3" height="13" rx=".5"/></svg>';
+
+const ROUND_CHART_TYPES = new Set(['doughnut', 'pie', 'polararea', 'radar']);
+
+function canvasSize(value: string | null): number | null {
+  const n = value !== null && value.trim() ? Number(value) : NaN;
+  return Number.isFinite(n) && n >= 1 && n <= 4000 ? Math.round(n) : null;
+}
+
+/**
+ * El `<canvas>` de un gráfico sin scripts se pinta transparente: se sustituye por una caja con borde punteado, un icono
+ * y «Gráfico · tipo». Conserva los atributos del canvas (clase —incluida `.nx`—, id, estilo y `_ngcontent-*`).
+ */
+export function replaceCanvasPlaceholders(doc: Document, label: string): void {
+  for (const canvas of Array.from(doc.body.querySelectorAll('canvas'))) {
+    try {
+      const div = doc.createElement('div');
+      for (const name of canvas.getAttributeNames()) {
+        if (name === 'width' || name === 'height') continue;
+        div.setAttribute(name, canvas.getAttribute(name) ?? '');
+      }
+      const raw = (canvas.getAttribute('data-nx-chart') || canvas.getAttribute('type') || canvas.getAttribute('charttype') || '').trim();
+      const type = CHART_TYPE_RE.test(raw) ? raw : '';
+      const text = type ? `${label} · ${type}` : label;
+      div.classList.add('nx-chart');
+      div.setAttribute('role', 'img');
+      div.setAttribute('aria-label', text);
+      const w = canvasSize(canvas.getAttribute('width'));
+      const h = canvasSize(canvas.getAttribute('height'));
+      if (w !== null && h !== null) {
+        const style = (div.getAttribute('style') ?? '').trim();
+        div.setAttribute('style', `${style}${style && !style.endsWith(';') ? ';' : ''}width:${w}px;height:${h}px;max-width:100%`);
+      } else if (ROUND_CHART_TYPES.has(type.toLowerCase())) {
+        div.classList.add('nx-chart--round');
+      }
+      div.innerHTML = CHART_PLACEHOLDER_SVG;
+      const span = doc.createElement('span');
+      span.className = 'nx-chart__label';
+      span.textContent = text;
+      div.appendChild(span);
+      canvas.replaceWith(div);
+    } catch (error: unknown) {
+      console.warn('[Nexo IA] Gráfico sin placeholder.', error instanceof Error ? error.name : '');
+    }
+  }
+}
+
 /** Quita los bloques `@font-face { … }` salvo los que solo usan `url()` con data URI de fuente. */
 function filterFontFaces(css: string): string {
   const re = /@font-face\b/gi;
@@ -1746,7 +1835,71 @@ export const NEXO_OVERLAY_CSS = [
   '.nx-wrap{display:inline-block;position:relative}',
   '.nx-gap{position:fixed;top:8px;right:8px;width:170px;height:40px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;border:2px dashed #ef4444;border-radius:6px;background:rgba(239,68,68,.06);z-index:2147483645}',
   `.nx-gap::after{content:attr(data-nx);padding:0 6px;color:#b91c1c;font:600 11px/1.2 ${NX_FONT};text-align:center}`,
+  // Modal de Bootstrap abierto y estático (el real es `display:none; position:fixed`).
+  '.modal[data-nx-modal]{display:block!important;position:relative!important;inset:auto!important;width:auto!important;height:auto!important;overflow:visible!important;opacity:1!important;z-index:auto!important;background:rgba(0,0,0,.5);padding:1px 0}',
+  '.modal[data-nx-modal] .modal-dialog{transform:none!important}',
+  // Placeholder de <canvas> (gráfico).
+  '.nx-chart{box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:100%;min-width:min(300px,100%);min-height:150px;aspect-ratio:2/1;max-height:400px;border:2px dashed #94a3b8;border-radius:8px;background:#f8fafc;color:#64748b}',
+  '.nx-chart--round{aspect-ratio:1/1;max-width:400px}',
+  '.nx-chart svg{width:40px;height:40px}',
+  `.nx-chart__label{font:600 12px/1.3 ${NX_FONT}}`,
 ].join('\n');
+
+const w = (selector: string, declarations: string): string => `:where(${selector}){${declarations}}`;
+
+const MAT_ICON_BASE = 'display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;white-space:nowrap';
+const MAT_ICON_FONT = `${MAT_ICON_BASE};font-family:'Material Icons','Material Icons Outlined','Material Symbols Outlined';font-style:normal;font-weight:400;`
+  + `line-height:1;letter-spacing:normal;text-transform:none;font-size:24px;width:24px;height:24px;overflow:hidden;font-feature-settings:'liga'`;
+const MAT_ICON_PLAIN = `${MAT_ICON_BASE};font-size:10px;line-height:1.2;padding:0 3px;border:1px solid rgba(0,0,0,.25);border-radius:4px;color:rgba(0,0,0,.6)`;
+const MAT_BUTTON = 'display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;height:36px;padding:0 16px;border:0;border-radius:4px;background:transparent;color:inherit;font-weight:500;font-size:14px;line-height:1;cursor:default';
+const MAT_ROUND = 'display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;border:0;border-radius:50%;background:transparent;color:inherit;padding:0';
+const LIB_CTRL = 'display:inline-flex;align-items:center;gap:6px';
+const PRIME_BOX = 'display:inline-block;box-sizing:border-box;min-width:160px;padding:6px 10px;border:1px solid #ced4da;border-radius:4px;background:#fff;color:#495057';
+
+/**
+ * Respaldo mínimo de aspecto para lo más común de Angular Material y PrimeNG cuando no se pueden cargar sus estilos
+ * reales. Todo en `:where()` (especificidad cero): siempre gana el CSS del proyecto o de la librería. Estático.
+ */
+const NEXO_LIB_FALLBACK_CSS = [
+  w('mat-form-field', 'display:inline-block;position:relative;box-sizing:border-box;min-width:180px;padding:6px 12px;background:#f5f5f5;border-bottom:1px solid rgba(0,0,0,.42);border-radius:4px 4px 0 0;vertical-align:middle'),
+  w('mat-form-field[appearance="outline"]', 'border:1px solid rgba(0,0,0,.38);border-radius:4px;background:transparent'),
+  w('mat-form-field input, mat-form-field textarea, mat-form-field select', 'display:block;width:100%;border:0;outline:0;background:transparent;font:inherit;padding:2px 0;box-sizing:border-box'),
+  w('mat-form-field [matsuffix]', 'position:absolute;right:4px;top:50%;transform:translateY(-50%)'),
+  w('mat-label', 'display:block;font-size:12px;color:rgba(0,0,0,.6)'),
+  w('mat-hint', 'display:block;font-size:12px;color:rgba(0,0,0,.6)'),
+  w('mat-error', 'display:block;font-size:12px;color:#f44336'),
+  w('button[mat-button], button[mat-raised-button], button[mat-flat-button], button[mat-stroked-button], a[mat-button], a[mat-raised-button], a[mat-flat-button], a[mat-stroked-button]', MAT_BUTTON),
+  w('button[mat-raised-button], button[mat-flat-button]', 'background:#e0e0e0;color:rgba(0,0,0,.87)'),
+  w('button[mat-raised-button][color="primary"], button[mat-flat-button][color="primary"]', 'background:#3f51b5;color:#fff'),
+  w('button[mat-stroked-button]', 'border:1px solid rgba(0,0,0,.12)'),
+  w('button[mat-icon-button], button[mat-mini-fab]', `${MAT_ROUND};width:40px;height:40px`),
+  w('button[mat-fab]', `${MAT_ROUND};width:56px;height:56px`),
+  w('button[mat-fab], button[mat-mini-fab]', 'background:#e0e0e0;color:rgba(0,0,0,.87)'),
+  w('button[mat-fab][color="primary"], button[mat-mini-fab][color="primary"]', 'background:#3f51b5;color:#fff'),
+  w('mat-card', 'display:block;box-sizing:border-box;padding:16px;border-radius:4px;background:#fff;box-shadow:0 2px 1px -1px rgba(0,0,0,.2),0 1px 1px 0 rgba(0,0,0,.14),0 1px 3px 0 rgba(0,0,0,.12)'),
+  w('mat-card-title', 'display:block;font-size:20px;font-weight:500'),
+  w('mat-card-subtitle, mat-card-header, mat-card-content, mat-card-actions, mat-card-footer', 'display:block'),
+  w('mat-toolbar', 'display:flex;align-items:center;box-sizing:border-box;height:64px;padding:0 16px;background:#f5f5f5'),
+  w('mat-divider', 'display:block;border-top:1px solid rgba(0,0,0,.12)'),
+  w('mat-select', 'display:inline-block;box-sizing:border-box;min-width:160px;padding:2px 0;border-bottom:1px solid rgba(0,0,0,.42)'),
+  ':where(mat-select)::before{content:attr(placeholder);color:rgba(0,0,0,.6)}',
+  w('mat-select mat-option', 'display:none'),
+  w('mat-checkbox, mat-radio-button, mat-slide-toggle', LIB_CTRL),
+  w('mat-spinner, mat-progress-spinner', 'display:inline-block;width:40px;height:40px;box-sizing:border-box;border:4px solid #c5cae9;border-top-color:#3f51b5;border-radius:50%'),
+  w('mat-progress-bar', 'display:block;height:4px;background:#c5cae9'),
+  ':where(p-button[label])::before{content:attr(label)}',
+  w('p-button[label]', 'display:inline-flex;align-items:center;justify-content:center;padding:7px 16px;border-radius:4px;background:#3b82f6;color:#fff;font-size:14px'),
+  w('p-dropdown', PRIME_BOX),
+  ':where(p-dropdown[placeholder])::before{content:attr(placeholder);color:#6c757d}',
+  w('p-card', 'display:block;padding:16px;border:1px solid #dee2e6;border-radius:6px;background:#fff'),
+  w('p-divider', 'display:block;border-top:1px solid #dee2e6'),
+].join('\n');
+
+/** Respaldo de librerías; `mat-icon` usa la fuente de iconos solo si el CSS global la trae (`@font-face` incrustada). */
+function libFallbackCss(globalCss: string): string {
+  const hasIconFont = /@font-face[^}]*Material (?:Icons|Symbols)/i.test(globalCss);
+  return `${NEXO_LIB_FALLBACK_CSS}\n${w('mat-icon', hasIconFont ? MAT_ICON_FONT : MAT_ICON_PLAIN)}`;
+}
 
 const CSP = `default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:`;
 
@@ -1783,7 +1936,7 @@ export function buildSrcdoc(p: {
   const componentCss = freezeViewportUnits(p.componentCss, width, height);
   return '<!doctype html><html><head><meta charset="utf-8">'
     + `<meta http-equiv="Content-Security-Policy" content="${CSP}">`
-    + `<style>${NEXO_BASE_CSS}</style><style>${globalCss}</style><style>${componentCss}</style><style>${NEXO_OVERLAY_CSS}</style>`
+    + `<style>${NEXO_BASE_CSS}</style><style>${libFallbackCss(globalCss)}</style><style>${globalCss}</style><style>${componentCss}</style><style>${NEXO_OVERLAY_CSS}</style>`
     + `</head><body data-nx-tone="${tone}">${p.html}</body></html>`;
 }
 

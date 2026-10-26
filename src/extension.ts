@@ -4,6 +4,7 @@ import { HostAi, isCancelled, type GeneratedFlow } from './host-ai';
 import { registerChatParticipant } from './host-chat';
 import { registerDbCommands } from './host-db';
 import { registerFlowTool } from './host-tool';
+import { registerFlowUriHandler } from './host-uri';
 
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const MAX_PROPOSALS = 10;
@@ -178,6 +179,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     ...registerChatParticipant(context, ai),
     ...registerFlowTool(context, ai),
+    registerFlowUriHandler(context, ai),
     ...registerDbCommands(context, () => FlowPanel.clearDbCache()),
   );
 }

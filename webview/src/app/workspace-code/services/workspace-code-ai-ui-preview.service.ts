@@ -5,6 +5,7 @@ import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
 import { NexoProjectService } from '../../project/nexo-project.service';
 import {
   WorkspaceCodeFile,
+  WorkspaceCodeMount,
   codeMimeFor,
   encodeUtf8Base64,
   isCodeFileReady,
@@ -40,6 +41,8 @@ import {
   buildSrcdoc,
   encapsulateCss,
   markAndDecorate,
+  openModalsForPlan,
+  replaceCanvasPlaceholders,
   resolveTemplate,
   reverseFileChange,
   sanitizeCss,
@@ -84,7 +87,13 @@ export interface UiScreenView {
    * Documento al ancho del tamaño elegido: `width` = ancho del viewport, `height` = alto del documento,
    * `viewportHeight` = alto de la ventana simulada; `crop` = encuadre (raíz del plan) en píxeles del documento.
    */
-  frame: { width: number; height: number; viewportHeight: number; crop: { x: number; y: number; w: number; h: number } };
+  frame: {
+    width: number; height: number; viewportHeight: number; crop: { x: number; y: number; w: number; h: number };
+    /** El encuadre abarca un modal completo (cabecera, cuerpo y pie): se ajusta también en alto. */
+    contain?: boolean;
+  };
+  /** Falta `node_modules` (o un paquete): los estilos de librerías no se muestran. */
+  missingDeps: boolean;
 }
 
 /** Partes de una variante independientes del tamaño de pantalla (CSS y HTML ya saneados). */
@@ -97,6 +106,7 @@ interface ViewParts {
   caption: string;
   state: UiPreviewState;
   approximate: boolean;
+  missingDeps: boolean;
 }
 
 type PartsPair = { now?: ViewParts; after?: ViewParts };
@@ -152,12 +162,29 @@ interface RenderEnv {
   assets: Map<string, string | null>;
   /** `angular.json` del montaje (`undefined` = aún no leído; `null` = no existe o no es válido). */
   angular?: AngularBuildConfig | null;
+  /** Alguna hoja global de `node_modules` no se pudo leer porque falta el paquete o la carpeta. */
+  missingDeps: boolean;
+  /** Paquete (`node_modules/<pkg>`) → existe, sondeado una vez por carga. */
+  pkgProbe: Map<string, boolean>;
+  /** `@import` de hojas globales resueltos en esta carga. */
+  cssImports: number;
+}
+
+/** Componente que envuelve al objetivo en el render local (no entra en el contexto de la IA). */
+interface ScreenWrapper {
+  source: ComponentSource;
+  /** Etiqueta del hijo que sustituye el objetivo (`parent`) o `router-outlet` (`shell`). */
+  slot: string;
+  kind: 'parent' | 'shell';
+  children: ComponentSource[];
 }
 
 interface ScreenBuild {
   env: RenderEnv;
   root: ComponentSource;
   children: ComponentSource[];
+  /** Padres, layouts de ruta y shell, de dentro hacia fuera. */
+  wrappers: ScreenWrapper[];
   globals: { path: string; css: string }[];
   contextJson: string;
   contextBase64: string;
@@ -191,7 +218,11 @@ const MAX_DOC_H = 4000;
 const THUMB_W = 398;
 const THUMB_MAX_H = 280;
 const CROP_MARGIN = 8;
-const MAX_GLOBAL_CSS = 1536 * 1024;
+/** Bootstrap + temas + iconos con fuentes incrustadas como data URI; el srcdoc sigue acotado por `MAX_SRCDOC`. */
+const MAX_GLOBAL_CSS = 2560 * 1024;
+const MAX_CSS_IMPORT_DEPTH = 2;
+const MAX_CSS_IMPORTS = 8;
+const PACKAGE_NAME = /^(@[a-z0-9._~-]+\/)?[a-z0-9._~-]+$/i;
 const MAX_COMPONENT_CSS = 512 * 1024;
 const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 const MAX_SVG_BYTES = 512 * 1024;
@@ -209,6 +240,10 @@ const MAX_VIEW_CACHE = 2;
 const SVG_UNSAFE = /<script\b|<foreignObject\b|\son[a-z]+\s*=|javascript:|<!ENTITY/i;
 const MAX_INDEX_FILES = 200;
 const MAX_CHILDREN = 8;
+const MAX_PARENT_DEPTH = 3;
+const MAX_LAYOUT_DEPTH = 2;
+const MAX_WRAPPERS = 5;
+const MAX_ROUTING_FILES = 40;
 /** Límites del contrato UI_PLAN (los valida también el backend). */
 const LIMIT_FILE = 60000;
 const LIMIT_SHEETS = 4;
@@ -284,6 +319,185 @@ function cutCss(css: string, max: number): string {
   return at > 0 ? css.slice(0, at + 1) : css.slice(0, max);
 }
 
+/* ---------------------------- padres, layouts y shell ---------------------------- */
+
+const MAX_SLOT_CLONES = 8;
+const MAX_ROUTE_DEPTH = 6;
+const ROUTING_FILE = /routing|\.routes\.ts$|^routes\.ts$|\.module\.ts$|^main\.ts$/i;
+const ROUTING_HINT = /Routes|RouterModule\s*\.\s*for|provideRouter|bootstrap/;
+
+function stripHtmlComments(html: string): string {
+  return String(html ?? '').replace(/<!--[\s\S]*?-->/g, '');
+}
+
+/** Copia de un host sin la marca de la IA (`.nx`, `data-nx`, `.nx-wrap`): para las demás apariciones de su etiqueta. */
+function unmarkedClone(host: Element): Element {
+  const clone = host.cloneNode(true) as Element;
+  for (const el of [clone, ...Array.from(clone.querySelectorAll('.nx, [data-nx]'))]) {
+    el.classList.remove('nx');
+    el.removeAttribute('data-nx');
+  }
+  for (const wrap of Array.from(clone.querySelectorAll('.nx-wrap'))) wrap.replaceWith(...Array.from(wrap.childNodes));
+  return clone;
+}
+
+/** Atributos de la etiqueta del hijo en el padre (`_ngcontent-*`, `class`, `style`…) que el host aún no tiene. */
+function mergeSlotAttributes(host: Element, slot: Element): void {
+  for (const name of slot.getAttributeNames()) {
+    if (name === 'class') {
+      for (const c of Array.from(slot.classList)) host.classList.add(c);
+    } else if (!host.hasAttribute(name)) {
+      host.setAttribute(name, slot.getAttribute(name) ?? '');
+    }
+  }
+}
+
+/** Copia del TS con comentarios y literales vaciados (misma longitud): buscar corchetes sin falsos positivos. */
+function blankTsLiterals(src: string): string {
+  const out = src.split('');
+  const n = src.length;
+  const blank = (a: number, b: number): void => {
+    for (let k = a; k < b; k++) if (out[k] !== '\n') out[k] = ' ';
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    if (c === '/' && src[i + 1] === '/') {
+      let j = src.indexOf('\n', i);
+      if (j < 0) j = n;
+      blank(i, j);
+      i = j;
+    } else if (c === '/' && src[i + 1] === '*') {
+      let j = src.indexOf('*/', i + 2);
+      j = j < 0 ? n : j + 2;
+      blank(i, j);
+      i = j;
+    } else if (c === '"' || c === "'" || c === '`') {
+      let j = i + 1;
+      while (j < n && src[j] !== c) {
+        if (src[j] === '\\') j++;
+        j++;
+      }
+      j = Math.min(n, j + 1);
+      blank(i + 1, Math.max(i + 1, j - 1));
+      i = j;
+    } else {
+      i++;
+    }
+  }
+  return out.join('');
+}
+
+/** Índice del cierre que corresponde a la apertura `open` (`-1` si no cierra). */
+function matchClose(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    const c = s[i];
+    if (c === '[' || c === '{' || c === '(') depth++;
+    else if (c === ']' || c === '}' || c === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+interface RouteInfo {
+  /** Clases de componente que son componente de alguna ruta. */
+  routed: Set<string>;
+  /** Clase de ruta → layouts (rutas padre con `component` y `children`), del más interno al más externo. */
+  layoutsOf: Map<string, string[]>;
+  /** Clase del componente bootstrap (`AppComponent`). */
+  bootstrap: string | null;
+}
+
+function parseRouteObject(s: string, open: number, close: number, ancestors: string[], depth: number, info: RouteInfo): void {
+  // Solo las propiedades del propio objeto: lo anidado en [], {} o () se vacía.
+  let flat = '';
+  let level = 0;
+  for (let k = open + 1; k < close; k++) {
+    const c = s[k];
+    if (c === '[' || c === '{' || c === '(') {
+      flat += c;
+      level++;
+    } else if (c === ']' || c === '}' || c === ')') {
+      level--;
+      flat += c;
+    } else {
+      flat += level === 0 ? c : ' ';
+    }
+  }
+  let comp: string | null = /(?:^|[\s,{])component\s*:\s*([A-Z][\w$]*)/.exec(flat)?.[1] ?? null;
+  if (!comp) {
+    const lazy = /(?:^|[\s,{])loadComponent\s*:/.exec(flat);
+    if (lazy) {
+      const from = lazy.index + lazy[0].length;
+      const comma = flat.indexOf(',', from);
+      const segment = s.slice(open + 1 + from, open + 1 + (comma < 0 ? flat.length : comma));
+      comp = /\.then\s*\(\s*(?:\(\s*)?\w+\s*\)?\s*=>\s*\(?\s*\w+\s*\.\s*([A-Z][\w$]*)/.exec(segment)?.[1]
+        ?? /\.then\s*\(\s*\(\s*\{\s*([A-Z][\w$]*)/.exec(segment)?.[1]
+        ?? null;
+    }
+  }
+  if (comp) {
+    info.routed.add(comp);
+    if (ancestors.length && !info.layoutsOf.has(comp)) info.layoutsOf.set(comp, [...ancestors].reverse());
+  }
+  const kids = /(?:^|[\s,{])children\s*:\s*\[/.exec(flat);
+  if (kids) parseRouteArray(s, open + 1 + kids.index + kids[0].length - 1, comp ? [...ancestors, comp] : ancestors, depth + 1, info);
+}
+
+function parseRouteArray(s: string, open: number, ancestors: string[], depth: number, info: RouteInfo): void {
+  if (depth > MAX_ROUTE_DEPTH) return;
+  const end = matchClose(s, open);
+  if (end < 0) return;
+  let i = open + 1;
+  while (i < end) {
+    const c = s[i];
+    if (c === '{') {
+      const close = matchClose(s, i);
+      if (close < 0 || close > end) return;
+      parseRouteObject(s, i, close, ancestors, depth, info);
+      i = close + 1;
+    } else if (c === '[' || c === '(') {
+      const close = matchClose(s, i);
+      if (close < 0) return;
+      i = close + 1;
+    } else {
+      i++;
+    }
+  }
+}
+
+/** Rutas y bootstrap de un conjunto de textos TS (routing, módulos, `main.ts`). */
+function parseRouting(texts: string[]): RouteInfo {
+  const info: RouteInfo = { routed: new Set(), layoutsOf: new Map(), bootstrap: null };
+  for (const text of texts) {
+    const clean = blankTsLiterals(text);
+    const entry = /(?:\bRoutes\s*=\s*|RouterModule\s*\.\s*for(?:Root|Child)\s*\(\s*|provideRouter\s*\(\s*)\[/g;
+    let m: RegExpExecArray | null;
+    while ((m = entry.exec(clean))) parseRouteArray(clean, m.index + m[0].length - 1, [], 0, info);
+    if (!info.bootstrap) {
+      const b = /bootstrap\s*:\s*\[\s*([A-Z][\w$]*)/.exec(clean) ?? /bootstrapApplication\(\s*([A-Z][\w$]*)/.exec(clean);
+      if (b) info.bootstrap = b[1];
+    }
+  }
+  return info;
+}
+
+/** El `<router-outlet>` tiene otros hermanos (cabecera, nav, pie…) aparte de espacios y comentarios. */
+function outletHasSiblings(html: string): boolean {
+  return stripHtmlComments(html).replace(/<router-outlet\b[^>]*>(?:\s*<\/router-outlet>)?/gi, '').trim().length > 0;
+}
+
+function commonDirDepth(a: string, b: string): number {
+  const x = a.split('/');
+  const y = b.split('/');
+  let n = 0;
+  while (n < x.length && n < y.length && x[n] === y[n]) n++;
+  return n;
+}
+
 /**
  * Vista de pantalla (Nexo IA, fase 2.2). Reúne el componente Angular del paso ancla (ts, html, estilos, hijos de un
  * nivel y estilos globales), pide a la IA solo un `UiPreviewPlan` (< 150 tokens de salida) y pinta en local, con el
@@ -332,6 +546,11 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   private readonly selectorIndex = new Map<string, Map<string, string>>();
   /** Hijos resueltos por montaje y etiqueta (ruta del `.ts` o `null`). */
   private readonly childPaths = new Map<string, string | null>();
+  /** Padres, rutas y clases por montaje: se vacían cuando cambia la identidad de la lista de archivos. */
+  private wrapperFiles: readonly WorkspaceCodeFile[] | null = null;
+  private readonly parentPaths = new Map<string, string[]>();
+  private readonly routeInfoCache = new Map<string, RouteInfo>();
+  private readonly classPaths = new Map<string, string | null>();
 
   constructor(
     private project: NexoProjectService,
@@ -520,19 +739,23 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     try {
       const isAllowed = await this.project.fileFilter();
       const validator = new FlowRefValidator(this.project, isAllowed);
-      for (let i = Math.min(ctx.anchor, flow.steps.length - 1); i >= 0; i--) {
-        const step = flow.steps[i];
-        const refs = [step.ref, step.snippet?.ref ?? null].filter((r): r is CodeRef => !!r && r.verification !== 'unverified');
-        for (const ref of refs) {
-          const target = await this.componentForRef(ref, validator, isAllowed);
-          if (run !== this.resolveRun) return;
-          if (!target) continue;
-          this.target = target;
-          this.screenStep = ctx.anchor;
-          this.componentName = target.meta.className;
-          this.refLine = this.refLineOf(target);
-          this.changed$.next();
-          return;
+      // Primero las referencias verificadas; si ninguna da componente, las no verificadas (la línea puede no casar,
+      // pero el archivo sí existe y `componentForRef` lo valida igual).
+      for (const verified of [true, false]) {
+        for (let i = Math.min(ctx.anchor, flow.steps.length - 1); i >= 0; i--) {
+          const step = flow.steps[i];
+          const refs = [step.ref, step.snippet?.ref ?? null].filter((r): r is CodeRef => !!r && (r.verification !== 'unverified') === verified);
+          for (const ref of refs) {
+            const target = await this.componentForRef(ref, validator, isAllowed);
+            if (run !== this.resolveRun) return;
+            if (!target) continue;
+            this.target = target;
+            this.screenStep = ctx.anchor;
+            this.componentName = target.meta.className;
+            this.refLine = this.refLineOf(target);
+            this.changed$.next();
+            return;
+          }
         }
       }
     } catch (error: unknown) {
@@ -638,7 +861,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   /* ---------------------------- contexto ---------------------------- */
 
   private envFor(prefix: string, validator: FlowRefValidator, isAllowed: (f: WorkspaceCodeFile) => boolean): RenderEnv {
-    return { validator, isAllowed, prefix, assetsTotal: 0, approximate: false, assets: new Map() };
+    return { validator, isAllowed, prefix, assetsTotal: 0, approximate: false, assets: new Map(), missingDeps: false, pkgProbe: new Map(), cssImports: 0 };
   }
 
   private async buildContext(ctx: UiScreenContext, target: ScreenTarget): Promise<ScreenBuild> {
@@ -683,6 +906,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       if (child) children.push({ ...child, tag });
       else env.approximate = true;
     }
+    const wrappers = await this.contextWrappers(root, env);
     const globals = await this.globalSheets(env);
 
     // Contexto para la IA (todo enmascarado; límites del contrato).
@@ -783,9 +1007,11 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     const planKey = await sha256Hex(`ui-plan\u0000${json}`);
     const filesKey = await sha256Hex(JSON.stringify([
       root.ts.text, root.html.text, root.css.map((c) => c.text), children.map((c) => [c.tag, c.ts.text, c.html.text, c.css.map((s) => s.text)]),
+      wrappers.map((w) => [w.slot, w.source.ts.text, w.source.html.text, w.source.css.map((c) => c.text),
+        w.children.map((c) => [c.tag, c.ts.text, c.html.text, c.css.map((x) => x.text)])]),
       globals.map((g) => g.css), ctx.proposal ? [ctx.proposal.id, ctx.proposal.status] : null, ctx.mode,
     ]));
-    return { env, root, children, globals, contextJson: json, contextBase64, planKey, filesKey, htmlTrim };
+    return { env, root, children, wrappers, globals, contextJson: json, contextBase64, planKey, filesKey, htmlTrim };
   }
 
   /**
@@ -985,6 +1211,189 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     return index;
   }
 
+  /* ---------------------------- padres, layouts y shell ---------------------------- */
+
+  /** Las cachés de padres, rutas y clases se vacían cuando cambia la lista de archivos del proyecto. */
+  private syncWrapperCaches(): void {
+    const files = this.project.project.files;
+    if (this.wrapperFiles === files) return;
+    this.wrapperFiles = files;
+    this.parentPaths.clear();
+    this.routeInfoCache.clear();
+    this.classPaths.clear();
+  }
+
+  /** Componentes de ruta, layouts (rutas padre con `children`) y componente bootstrap del montaje. */
+  private async routeInfoFor(env: RenderEnv): Promise<RouteInfo> {
+    this.syncWrapperCaches();
+    const cached = this.routeInfoCache.get(env.prefix);
+    if (cached) return cached;
+    let info: RouteInfo = { routed: new Set(), layoutsOf: new Map(), bootstrap: null };
+    try {
+      const files = this.project.project.files
+        .filter((f) => f.extension === 'ts' && (!env.prefix || f.path.startsWith(env.prefix)) && !f.path.includes('node_modules/')
+          && !/\.spec\.ts$/i.test(f.name) && ROUTING_FILE.test(f.name) && env.isAllowed(f))
+        .slice(0, MAX_ROUTING_FILES);
+      const texts: string[] = [];
+      for (const file of files) {
+        const text = await this.readText(file, env);
+        if (text !== null && ROUTING_HINT.test(text)) texts.push(text);
+      }
+      info = parseRouting(texts);
+    } catch (error: unknown) {
+      console.warn('[Nexo IA] No se pudieron leer las rutas.', error instanceof Error ? error.name : '');
+    }
+    this.routeInfoCache.set(env.prefix, info);
+    return info;
+  }
+
+  /** `.ts` de un componente por el nombre de su clase (`<nombre>.component.ts` o búsqueda en los `*.component.ts`). */
+  private async componentFileByClass(name: string, env: RenderEnv, nearPath?: string): Promise<WorkspaceCodeFile | null> {
+    this.syncWrapperCaches();
+    if (!/^[A-Za-z_$][\w$]*$/.test(name)) return null;
+    const cacheKey = `${env.prefix}|${name}`;
+    if (this.classPaths.has(cacheKey)) {
+      const path = this.classPaths.get(cacheKey) ?? null;
+      if (path) return this.fileInMount(path, env);
+    } else {
+      const all = this.project.project.files.filter((f) => (!env.prefix || f.path.startsWith(env.prefix)) && /\.component\.ts$/i.test(f.name)
+        && !f.path.includes('node_modules/') && !/\.spec\.ts$/i.test(f.name) && env.isAllowed(f));
+      const kebab = name.replace(/Component$/, '').replace(/([a-z0-9])([A-Z])/g, '$1-$2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2').toLowerCase();
+      const wanted = `${kebab}.component.ts`;
+      const classRe = new RegExp(`export\\s+(?:default\\s+)?(?:abstract\\s+)?class\\s+${name.replace(/\$/g, '\\$')}(?![\\w$])`);
+      const ordered = [...all.filter((f) => f.name.toLowerCase() === wanted), ...all.filter((f) => f.name.toLowerCase() !== wanted).slice(0, MAX_INDEX_FILES)];
+      for (const file of ordered) {
+        const text = await this.readText(file, env);
+        if (text === null || !classRe.test(text)) continue;
+        if (parseComponentMeta(text)?.className !== name) continue;
+        this.classPaths.set(cacheKey, file.path);
+        return file;
+      }
+      this.classPaths.set(cacheKey, null);
+    }
+    if (!nearPath) return null;
+    // Bootstrap sin clase localizable: el `app.component.ts` más cercano al objetivo.
+    const apps = this.project.project.files
+      .filter((f) => (!env.prefix || f.path.startsWith(env.prefix)) && f.name.toLowerCase() === 'app.component.ts' && !f.path.includes('node_modules/') && env.isAllowed(f))
+      .sort((a, b) => commonDirDepth(dirname(b.path), dirname(nearPath)) - commonDirDepth(dirname(a.path), dirname(nearPath)));
+    for (const file of apps) {
+      const text = await this.readText(file, env);
+      if (text !== null && parseComponentMeta(text)) return file;
+    }
+    return null;
+  }
+
+  /** `.html` → `.ts` hermano cuyo `templateUrl` apunta a él (misma lógica que `componentForRef`). */
+  private async componentForTemplate(htmlFile: WorkspaceCodeFile, env: RenderEnv): Promise<{ file: WorkspaceCodeFile; className: string } | null> {
+    const dir = dirname(htmlFile.path);
+    const stem = htmlFile.name.replace(/\.[^.]+$/, '');
+    const siblings = this.project.project.files.filter((f) => dirname(f.path) === dir && f.extension === 'ts' && !/\.spec\.ts$/i.test(f.name) && env.isAllowed(f));
+    siblings.sort((a, b) => Number(b.name === `${stem}.ts`) - Number(a.name === `${stem}.ts`));
+    for (const ts of siblings) {
+      const text = await this.readText(ts, env);
+      const meta = text ? parseComponentMeta(text) : null;
+      if (meta?.templateUrl && resolveCodeReference(ts.path, meta.templateUrl) === htmlFile.path) return { file: ts, className: meta.className };
+    }
+    return null;
+  }
+
+  /** Componentes cuya plantilla usa `<tag>`: de ruta primero, luego el directorio más cercano al hijo. */
+  private async scanParents(tag: string, env: RenderEnv, childDir: string): Promise<string[]> {
+    const re = new RegExp(`<${tag}(?=[\\s/>])`, 'i');
+    const info = await this.routeInfoFor(env);
+    const inMount = (f: WorkspaceCodeFile): boolean => (!env.prefix || f.path.startsWith(env.prefix)) && !f.path.includes('node_modules/') && env.isAllowed(f);
+    const files = this.project.project.files;
+    const found = new Map<string, boolean>();
+    for (const file of files.filter((f) => /\.html?$/i.test(f.name) && inMount(f)).slice(0, MAX_INDEX_FILES)) {
+      const text = await this.readText(file, env);
+      if (text === null || !re.test(stripHtmlComments(text))) continue;
+      const owner = await this.componentForTemplate(file, env);
+      if (owner) found.set(owner.file.path, info.routed.has(owner.className));
+    }
+    for (const file of files.filter((f) => /\.component\.ts$/i.test(f.name) && !/\.spec\.ts$/i.test(f.name) && inMount(f)).slice(0, MAX_INDEX_FILES)) {
+      if (found.has(file.path)) continue;
+      const text = await this.readText(file, env);
+      const meta = text ? parseComponentMeta(text) : null;
+      if (meta && meta.template !== undefined && re.test(stripHtmlComments(meta.template))) found.set(file.path, info.routed.has(meta.className));
+    }
+    return [...found.entries()]
+      .sort(([pa, ra], [pb, rb]) => Number(rb) - Number(ra) || commonDirDepth(dirname(pb), childDir) - commonDirDepth(dirname(pa), childDir) || pa.localeCompare(pb))
+      .map(([path]) => path);
+  }
+
+  private async findParentComponent(tag: string, env: RenderEnv, visited: Set<string>, childDir: string): Promise<WorkspaceCodeFile | null> {
+    this.syncWrapperCaches();
+    const cacheKey = `${env.prefix}|${tag}`;
+    let paths = this.parentPaths.get(cacheKey);
+    if (!paths) {
+      paths = await this.scanParents(tag, env, childDir);
+      this.parentPaths.set(cacheKey, paths);
+    }
+    for (const path of paths) {
+      if (visited.has(path)) continue;
+      const file = this.fileInMount(path, env);
+      if (file) return file;
+    }
+    return null;
+  }
+
+  /**
+   * Contexto de la pantalla (solo render local): padres que montan el objetivo por su selector (hasta llegar a un
+   * componente de ruta o al bootstrap), layouts de ruta y AppComponent con los hermanos del `<router-outlet>`.
+   * Un objetivo con ruta que además se usa por su selector en otra página se monta dentro de esa página.
+   * Ordenados de dentro hacia fuera. Si algo falla, el objetivo se renderiza solo.
+   */
+  private async contextWrappers(root: ComponentSource, env: RenderEnv): Promise<ScreenWrapper[]> {
+    const wrappers: ScreenWrapper[] = [];
+    try {
+      const info = await this.routeInfoFor(env);
+      const visited = new Set<string>([root.ts.path]);
+      let cur = root;
+      for (let depth = 0; depth < MAX_PARENT_DEPTH && wrappers.length < MAX_WRAPPERS; depth++) {
+        const curRouted = info.routed.has(cur.name);
+        if (cur.name === info.bootstrap || !cur.tag || (curRouted && depth > 0)) break;
+        const file = await this.findParentComponent(cur.tag, env, visited, dirname(cur.ts.path));
+        if (!file) break;
+        visited.add(file.path);
+        const parent = await this.componentSource(file, env);
+        if (!parent || parent.html.text.length > LIMIT_FILE) break;
+        if (curRouted && !(info.routed.has(parent.name) || parent.name === info.bootstrap)) break;
+        wrappers.push({ source: parent, slot: cur.tag, kind: 'parent', children: [] });
+        cur = parent;
+      }
+      if (info.routed.has(cur.name)) {
+        const names = (info.layoutsOf.get(cur.name) ?? []).slice(0, MAX_LAYOUT_DEPTH);
+        if (info.bootstrap) names.push(info.bootstrap);
+        for (const name of names) {
+          if (wrappers.length >= MAX_WRAPPERS) break;
+          const isBootstrap = name === info.bootstrap;
+          const file = await this.componentFileByClass(name, env, isBootstrap ? cur.ts.path : undefined);
+          if (!file || visited.has(file.path)) continue;
+          const source = await this.componentSource(file, env);
+          if (!source || source.html.text.length > LIMIT_FILE) continue;
+          if (!/<router-outlet\b/i.test(stripHtmlComments(source.html.text))) continue;
+          if (isBootstrap && !outletHasSiblings(source.html.text)) continue;
+          visited.add(file.path);
+          wrappers.push({ source, slot: 'router-outlet', kind: 'shell', children: [] });
+        }
+      }
+      const reserved = new Set<string>([root.tag, 'router-outlet', ...wrappers.map((w) => w.source.tag)]);
+      for (const w of wrappers) {
+        for (const tag of childTags(w.source.html.text)) {
+          if (w.children.length >= MAX_CHILDREN) break;
+          if (tag === w.slot || reserved.has(tag)) continue;
+          const file = await this.findChild(tag, env);
+          const child = file ? await this.componentSource(file, env) : null;
+          if (child) w.children.push({ ...child, tag });
+        }
+      }
+    } catch (error: unknown) {
+      console.warn('[Nexo IA] No se pudo reunir el contexto de la pantalla.', error instanceof Error ? error.name : '');
+      return [];
+    }
+    return wrappers;
+  }
+
   /* ---------------------------- render ---------------------------- */
 
   /** Partes de «Ahora» / «Con el cambio» (independientes del tamaño de pantalla; cacheadas por plan y archivos). */
@@ -1029,7 +1438,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       const body = variant === 'after' ? plan.after ?? null : plan;
       const planBody = body ?? plan;
-      const parts = await this.renderParts(planBody, sources.root, sources.children, globalCss, variant, env);
+      const parts = await this.renderParts(planBody, sources.root, sources.children, build.wrappers, globalCss, variant, env);
       if (patchApprox || (variant === 'after' && !plan.after)) parts.approximate = true;
       views[variant] = parts;
     }
@@ -1056,7 +1465,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         approximate = true;
       }
       const frame = await this.measureFrame(srcdoc, p.root, vp);
-      out[variant] = { srcdoc, approximate, caption: p.caption, state: p.state, viewport: vp.id, frame };
+      out[variant] = { srcdoc, approximate, caption: p.caption, state: p.state, viewport: vp.id, frame, missingDeps: p.missingDeps };
     }
     return out;
   }
@@ -1090,8 +1499,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     return { sources: { root: patchComponent(sources.root), children: sources.children.map(patchComponent) }, approximate };
   }
 
-  private async renderParts(plan: Omit<UiPreviewPlan, 'after'>, root: ComponentSource, children: ComponentSource[], globalCss: string,
-    variant: UiPreviewVariant, env: RenderEnv): Promise<ViewParts> {
+  private async renderParts(plan: Omit<UiPreviewPlan, 'after'>, root: ComponentSource, children: ComponentSource[], wrappers: ScreenWrapper[],
+    globalCss: string, variant: UiPreviewVariant, env: RenderEnv): Promise<ViewParts> {
     let approximate = false;
     // 1. Plantilla del componente (valores por defecto del .ts + bindings del plan).
     const resolved = resolveTemplate(root.html.text, {
@@ -1101,7 +1510,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       variant,
     });
     if (resolved.approximate) approximate = true;
-    const doc = resolved.doc;
+    let doc = resolved.doc;
     await this.inlineImages(doc.body, root.html.path, env);
     applyContentAttr(doc.body, 'nx-c0');
 
@@ -1117,14 +1526,14 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       return `nx-c${k}`;
     };
-    const fillHost = async (host: Element, child: ComponentSource, bindings: Record<string, unknown>): Promise<void> => {
+    const fillHost = async (host: Element, child: ComponentSource, bindings: Record<string, unknown>, into: Document, markSelector: string): Promise<void> => {
       const id = idFor(child);
-      const r = resolveTemplate(child.html.text, { bindings: { ...extractTsDefaults(child.ts.text), ...bindings }, state: plan.state, markSelector: plan.mark.selector, variant });
+      const r = resolveTemplate(child.html.text, { bindings: { ...extractTsDefaults(child.ts.text), ...bindings }, state: plan.state, markSelector, variant });
       if (r.approximate) approximate = true;
       await this.inlineImages(r.doc.body, child.html.path, env);
       applyContentAttr(r.doc.body, id);
       const projected = Array.from(host.childNodes);
-      const nodes = Array.from(r.doc.body.childNodes).map((n) => doc.importNode(n, true));
+      const nodes = Array.from(r.doc.body.childNodes).map((n) => into.importNode(n, true));
       host.replaceChildren(...nodes);
       const slots = Array.from(host.querySelectorAll('ng-content'));
       if (slots.length) {
@@ -1139,9 +1548,9 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       if (!hosts.length) continue;
       const child = byTag.get(tag);
       for (const host of hosts) {
-        if (child) await fillHost(host, child, plan.bindings);
+        if (child) await fillHost(host, child, plan.bindings, doc, plan.mark.selector);
         else {
-          host.replaceChildren();
+          // Elemento de librería (mat-*, p-*…): se conserva con su contenido proyectado, sin ejecutar nada.
           approximate = true;
         }
       }
@@ -1164,7 +1573,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         const host = doc.createElement(child.tag);
         host.setAttribute('_ngcontent-nx-c0', '');
         anchor.after(host);
-        await fillHost(host, child, plan.inject.inputs ?? {});
+        await fillHost(host, child, plan.inject.inputs ?? {}, doc, plan.mark.selector);
       } else {
         approximate = true;
       }
@@ -1177,12 +1586,66 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     while (doc.body.firstChild) host.appendChild(doc.body.firstChild);
     doc.body.appendChild(host);
 
-    // 5. Marca y saneado.
+    // 5. Marca y modales (solo dentro del objetivo: se aplican antes de envolverlo).
     const marked = markAndDecorate(doc, plan, variant);
     if (marked.approximate) approximate = true;
+    openModalsForPlan(doc, plan.root);
+
+    // 5b. Padres y shell: el objetivo se monta en el lugar de su etiqueta (padre) o del `<router-outlet>` (layout/AppComponent).
+    let applied = 0;
+    for (let k = 0; k < wrappers.length; k++) {
+      const w = wrappers[k];
+      const wid = `nx-w${k + 1}`;
+      try {
+        const r = resolveTemplate(w.source.html.text, {
+          bindings: extractTsDefaults(w.source.ts.text),
+          state: plan.state,
+          markSelector: '',
+          variant,
+        });
+        if (r.approximate) approximate = true;
+        await this.inlineImages(r.doc.body, w.source.html.path, env);
+        applyContentAttr(r.doc.body, wid);
+        for (const child of w.children) {
+          for (const childHost of Array.from(r.doc.body.querySelectorAll(child.tag))) await fillHost(childHost, child, {}, r.doc, '');
+        }
+        const slots = Array.from(r.doc.body.querySelectorAll(w.slot));
+        if (!slots.length) {
+          approximate = true;
+          break;
+        }
+        const nodes = Array.from(doc.body.childNodes).map((n) => r.doc.importNode(n, true));
+        if (w.kind === 'parent') {
+          const content = nodes.find((n): n is Element => n.nodeType === 1 && (n as Element).getAttributeNames().some((a) => a.startsWith('_nghost-'))) ?? null;
+          const extra = content ? slots.slice(1, MAX_SLOT_CLONES) : [];
+          const clones = content ? extra.map(() => unmarkedClone(content)) : [];
+          if (content) mergeSlotAttributes(content, slots[0]);
+          slots[0].replaceWith(...nodes);
+          extra.forEach((slot, i) => {
+            mergeSlotAttributes(clones[i], slot);
+            slot.replaceWith(clones[i]);
+          });
+        } else {
+          slots[0].after(...nodes);
+          slots[0].remove();
+        }
+        const wrapHost = r.doc.createElement(w.source.tag || 'div');
+        wrapHost.setAttribute(`_nghost-${wid}`, '');
+        while (r.doc.body.firstChild) wrapHost.appendChild(r.doc.body.firstChild);
+        r.doc.body.appendChild(wrapHost);
+        doc = r.doc;
+        applied = k + 1;
+      } catch (error: unknown) {
+        console.warn('[Nexo IA] No se pudo montar el componente en su contexto.', error instanceof Error ? error.name : '');
+        approximate = true;
+        break;
+      }
+    }
+    if (applied) for (const outlet of Array.from(doc.body.querySelectorAll('router-outlet'))) outlet.remove();
+    replaceCanvasPlaceholders(doc, this.i18n.t('aiFlow.screen.chart'));
     sanitizeFragmentDom(doc);
 
-    // 6. CSS del componente (encapsulado) y de los hijos.
+    // 6. CSS del componente (encapsulado), de los hijos y de los padres/shell.
     let componentCss = '';
     let cssBytes = 0;
     const addCss = async (source: ComponentSource, id: string): Promise<void> => {
@@ -1199,16 +1662,19 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     };
     await addCss(root, 'nx-c0');
     for (const { source, id } of used) await addCss(source, id);
+    for (let k = 0; k < applied; k++) await addCss(wrappers[k].source, `nx-w${k + 1}`);
 
     return {
       globalCss,
       componentCss: sanitizeCss(componentCss),
       html: doc.body.innerHTML,
       tone: uiToneOf(plan.state),
-      root: plan.root,
+      // Con padre, el encuadre es el host del padre inmediato (la página); sin él, la raíz del plan.
+      root: applied > 0 && wrappers[0].kind === 'parent' ? '[_nghost-nx-w1]' : plan.root,
       caption: plan.caption,
       state: plan.state,
       approximate: approximate || env.approximate,
+      missingDeps: env.missingDeps,
     };
   }
 
@@ -1278,13 +1744,22 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       let crop = { x: 0, y: 0, w: W, h: height };
       let target: Element | null = null;
       try {
-        target = doc.querySelector(rootSelector);
+        // El encuadre del padre inmediato se busca en todo el documento; la raíz del plan, dentro del objetivo.
+        const host = doc.querySelector('[_nghost-nx-c0]');
+        if (rootSelector.startsWith('[_nghost-nx-w')) target = doc.querySelector(rootSelector);
+        else target = host ? (host.matches(rootSelector) ? host : host.querySelector(rootSelector)) ?? doc.querySelector(rootSelector) : doc.querySelector(rootSelector);
       } catch {
         target = null;
       }
+      let contain = false;
+      const modal = target?.closest('[data-nx-modal]') ?? null;
+      if (modal) {
+        target = modal.querySelector('.modal-content') ?? target;
+        contain = true;
+      }
       if (target) {
         const r = target.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && r.width < W) {
+        if (r.width > 0 && r.height > 0 && (r.width < W || contain)) {
           const x = Math.max(0, Math.floor(r.left - CROP_MARGIN));
           const y = Math.max(0, Math.floor(r.top - CROP_MARGIN));
           crop = {
@@ -1296,7 +1771,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         }
       }
       const mark = doc.querySelector('.nx');
-      if (mark && crop.w > 0) {
+      if (mark && crop.w > 0 && !contain) {
         const s = Math.min(1, THUMB_W / crop.w);
         const visible = THUMB_MAX_H / s;
         const m = mark.getBoundingClientRect();
@@ -1306,7 +1781,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
           crop = { ...crop, y, h: Math.max(crop.h, Math.min(height - y, visible)) };
         }
       }
-      return { width: W, height, viewportHeight: H, crop };
+      return { width: W, height, viewportHeight: H, crop, ...(contain ? { contain: true } : {}) };
     } catch (error: unknown) {
       console.warn('[Nexo IA] No se pudo medir la vista de pantalla.', error instanceof Error ? error.name : '');
       return fallback;
@@ -1332,9 +1807,31 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
 
   /** Archivo de `node_modules` del montaje de `env`, leído del disco (no está en el índice del proyecto). */
   private readPackageFile(rel: string, env: RenderEnv, maxBytes: number, as: 'text' | 'base64'): Promise<string | null> {
-    const mount = this.project.project.mounts.find((m) => m.path && `${m.path}/` === env.prefix);
+    const mount = this.mountFor(env);
     if (!mount || !/^node_modules\//.test(rel)) return Promise.resolve(null);
     return this.project.readMountDisk(mount.id, rel, maxBytes, as);
+  }
+
+  /** Montaje de `env`: con una sola carpeta el host lo crea con `path: ''` (prefijo vacío). */
+  private mountFor(env: RenderEnv): WorkspaceCodeMount | null {
+    const mounts = this.project.project.mounts;
+    if (env.prefix) return mounts.find((m) => m.path && `${m.path}/` === env.prefix) ?? null;
+    return mounts.find((m) => !m.path) ?? (mounts.length === 1 ? mounts[0] : null);
+  }
+
+  /**
+   * `true` si falta el paquete de `rel` (`node_modules/<pkg>/…`) o la carpeta `node_modules`: se sondea su
+   * `package.json` (solo importa si existe). Nunca en el ejemplo ni sin montaje.
+   */
+  private async packageMissing(rel: string, env: RenderEnv): Promise<boolean> {
+    if (this.project.sample || !this.mountFor(env)) return false;
+    const m = /^node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(rel);
+    if (!m || !PACKAGE_NAME.test(m[1])) return false;
+    const cached = env.pkgProbe.get(m[1]);
+    if (cached !== undefined) return !cached;
+    const text = await this.readPackageFile(`node_modules/${m[1]}/package.json`, env, 1024 * 1024, 'text');
+    env.pkgProbe.set(m[1], text !== null);
+    return text === null;
   }
 
   private mountPrefix(file: WorkspaceCodeFile): string {
@@ -1464,8 +1961,13 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       if (!file && /^node_modules\/.+\.css$/i.test(clean)) {
         // Las hojas de paquetes (bootstrap, iconos…) no están en el índice: se leen de la carpeta vinculada.
         const css = await this.readPackageFile(clean, env, MAX_PACKAGE_CSS_BYTES, 'text');
-        if (css !== null) out.push({ path: `${env.prefix}${clean}`, css });
-        else env.approximate = true;
+        if (css !== null) {
+          const path = `${env.prefix}${clean}`;
+          out.push(...await this.expandCssImports(css, path, env, 0, new Set([path])), { path, css });
+        } else {
+          env.approximate = true;
+          if (await this.packageMissing(clean, env)) env.missingDeps = true;
+        }
         continue;
       }
       if (!file || !env.validator.usable(file)) {
@@ -1491,10 +1993,61 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         continue;
       }
       const text = await this.readText(file, env);
-      if (text !== null) out.push({ path: file.path, css: text });
+      if (text !== null) out.push(...await this.expandCssImports(text, file.path, env, 0, new Set([file.path])), { path: file.path, css: text });
       else env.approximate = true;
     }
     out.push(...await this.indexHtmlStyles(env));
+    return out;
+  }
+
+  /**
+   * Hojas `.css` locales o de paquetes (`~pkg/…`, `node_modules/…`, relativas) que importa una hoja global con
+   * `@import`, en orden y antes de ella (profundidad ≤ 2, ≤ 8 por carga). Las remotas, con media query o que no son
+   * `.css` se ignoran y marcan la vista aproximada. `sanitizeCss` elimina después el `@import`.
+   */
+  private async expandCssImports(css: string, fromPath: string, env: RenderEnv, depth: number, seen: Set<string>):
+    Promise<{ path: string; css: string }[]> {
+    const out: { path: string; css: string }[] = [];
+    const re = /@import\s+(?:url\(\s*)?(["'])([^"']+)\1\s*\)?\s*([^;]*);/gi;
+    const nm = `${env.prefix}node_modules/`;
+    for (const m of css.matchAll(re)) {
+      const spec = m[2].trim();
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(spec) || m[3].trim() || !/\.css$/i.test(spec.split('?')[0].split('#')[0])) {
+        env.approximate = true;
+        continue;
+      }
+      if (depth >= MAX_CSS_IMPORT_DEPTH || env.cssImports >= MAX_CSS_IMPORTS) {
+        env.approximate = true;
+        continue;
+      }
+      let raw: string | null;
+      if (spec.startsWith('~')) raw = `${nm}${spec.slice(1)}`;
+      else if (/^(?:\.\/)?node_modules\//.test(spec)) raw = `${env.prefix}${normPath(spec)}`;
+      else raw = resolveCodeReference(fromPath, spec);
+      const target = raw ? safeRelativePath(raw) : null;
+      if (!target || !/\.css$/i.test(target) || seen.has(target)) {
+        if (!target) env.approximate = true;
+        continue;
+      }
+      seen.add(target);
+      env.cssImports++;
+      const file = this.fileInMount(target, env);
+      let text: string | null;
+      if (file) {
+        text = await this.readText(file, env);
+      } else if (target.startsWith(nm)) {
+        const rel = target.slice(env.prefix.length);
+        text = await this.readPackageFile(rel, env, MAX_PACKAGE_CSS_BYTES, 'text');
+        if (text === null && await this.packageMissing(rel, env)) env.missingDeps = true;
+      } else {
+        text = null;
+      }
+      if (text === null) {
+        env.approximate = true;
+        continue;
+      }
+      out.push(...await this.expandCssImports(text, target, env, depth + 1, seen), { path: target, css: text });
+    }
     return out;
   }
 
@@ -1594,7 +2147,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       const file = this.fileInMount(candidate, env) ?? this.fileByPathCi(candidate, env);
       if (!file) {
         const safe = safeRelativePath(candidate);
-        if (!pkg && safe && prefix && safe.startsWith(`${prefix}node_modules/`)) pkg = safe;
+        if (!pkg && safe && safe.startsWith(`${prefix}node_modules/`)) pkg = safe;
         continue;
       }
       if (!this.assetAllowed(file)) continue;

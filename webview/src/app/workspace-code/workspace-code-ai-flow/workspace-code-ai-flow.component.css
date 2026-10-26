@@ -69,8 +69,8 @@
 /* Menú de acciones del paso */
 .wcf-stepmenu { position: absolute; left: 40px; top: 6px; z-index: 10; width: 232px; box-sizing: border-box; display: flex; flex-direction: column; gap: 1px; padding: 6px;
   border: 1px solid rgba(148, 163, 216, 0.22); border-radius: 10px; background: #141b31; color: #e2e8f0; cursor: default;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45); animation: wcf-fade 120ms ease-out both; }
-.wcf-stepmenu.is-up { top: auto; bottom: 6px; }
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45); animation: wcf-fade 120ms ease-out both; overflow-y: auto; }
+.wcf-stepmenu:not(.is-placed) { visibility: hidden; }
 .wcf-stepmenu__head { display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 2px 6px 6px; margin-bottom: 2px; border-bottom: 1px solid rgba(148, 163, 216, 0.14); }
 .wcf-stepmenu__step { font-size: 9.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #94a3b8; }
 .wcf-stepmenu__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--wcf-mono); font-size: 11px; color: #cbd5e1; background: none; padding: 0; }
@@ -373,6 +373,10 @@
 .wcf-uip__local { display: flex; align-items: center; gap: 4px; font-size: 10px; color: #64748b; }
 .wcf-uip__local .bi { color: #a855f7; }
 .wcf-uip__approx { display: flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; color: var(--wce-warning, #fbbf24); }
+.wcf-uip__deps { display: flex; align-items: flex-start; gap: 4px; margin: 0; font-size: 10.5px; font-weight: 600; line-height: 1.35; color: #94a3b8; }
+.wcf-uip__deps .bi { flex: none; margin-top: 1px; color: var(--wce-warning, #fbbf24); }
+.wcf-uip-zoom__deps { flex: none; margin: 0; padding: 4px 12px; font-size: 11px; color: #94a3b8; border-bottom: 1px solid rgba(148, 163, 216, 0.18); }
+.wcf-uip-zoom__deps .bi { color: var(--wce-warning, #fbbf24); }
 .wcf-uip__close:focus-visible, .wcf-uip__tabs button:focus-visible, .wcf-uip-zoom__fit button:focus-visible, .wcf-uip__vp button:focus-visible { outline: 2px solid var(--wce-accent); outline-offset: 1px; }
 .wcf-uip-open { margin-top: 6px; }
 @keyframes wcf-uip-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

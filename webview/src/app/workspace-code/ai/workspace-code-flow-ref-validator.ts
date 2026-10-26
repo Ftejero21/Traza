@@ -27,6 +27,8 @@ export interface ValidatedFlow {
 const NEAR_WINDOW = 30;
 const MAX_TEXT_CHARS = 3 * 1024 * 1024;
 const NO_CLASS_LANGS = new Set(['html', 'htm', 'sql', 'xml', 'json', 'yml', 'yaml', 'properties']);
+/** Plantillas, estilos y datos: no tienen funciones, así que `functionName` («template», «styles»…) no se busca en el texto. */
+const NO_FUNCTION_LANGS = new Set(['html', 'htm', 'css', 'scss', 'sass', 'less', 'xml', 'json', 'yml', 'yaml', 'properties']);
 const BRACE_LANGS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'java', 'kt', 'kts', 'cs', 'go', 'scala', 'swift', 'dart', 'php', 'c', 'cpp', 'h', 'hpp', 'rs']);
 
 export function refKey(ref: Pick<CodeRef, 'mountId' | 'file'>): string {
@@ -141,7 +143,7 @@ export class FlowRefValidator {
     }
     // Símbolos: la función (y la clase, salvo en lenguajes sin clases) deben aparecer en el archivo.
     if (verification !== 'unverified') {
-      const fnOk = !!ref.functionName && new RegExp(`(^|[^\\w$])${escapeRe(ref.functionName)}([^\\w$]|$)`).test(text);
+      const fnOk = NO_FUNCTION_LANGS.has(ext) || !!ref.functionName && new RegExp(`(^|[^\\w$])${escapeRe(ref.functionName)}([^\\w$]|$)`).test(text);
       const classOk = NO_CLASS_LANGS.has(ext) || (!!ref.className && new RegExp(`(^|[^\\w$])${escapeRe(ref.className)}([^\\w$]|$)`).test(text));
       if (!fnOk || !classOk) verification = 'unverified';
     }

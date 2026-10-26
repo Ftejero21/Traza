@@ -104,6 +104,12 @@ A la izquierda, el diff del cambio propuesto. A la derecha, **Simular cambios** 
 
 En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pago?») y el agente llamará a Nexo por su cuenta, o nómbralo con `#nexoFlujo`. VS Code pide confirmación, se abre el panel y el agente recibe los pasos en texto para su respuesta. La herramienta no modifica archivos.
 
+### Desde un enlace
+
+- Formato: `vscode://nexo-local.nexo-vscode/flow?q=<pregunta codificada con encodeURIComponent>`, con `&mode=sim|logs|db` opcional (`db` abre Recorrido si no hay conexión a la base de datos).
+- Ejemplo: `vscode://nexo-local.nexo-vscode/flow?q=%C2%BFC%C3%B3mo%20funciona%20el%20login%3F&mode=sim`
+- VS Code y Nexo siempre piden confirmación antes de enviar código al modelo, y no se modifica ningún archivo. Solo se procesa un enlace a la vez.
+
 ### Comandos
 
 | Comando | Qué hace |

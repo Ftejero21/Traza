@@ -26,12 +26,12 @@ const MAX_CONFIRM_QUESTION = 200;
 /** Ejecución en curso de la herramienta (gana la última invocación). */
 let currentRun: vscode.CancellationTokenSource | undefined;
 
-function isSpanish(): boolean {
+export function isSpanish(): boolean {
   return vscode.workspace.getConfiguration('nexo').get<string>('language') !== 'en';
 }
 
 /** Texto en una línea (saltos colapsados) y recortado a `max`. */
-function oneLine(value: unknown, max: number): string {
+export function oneLine(value: unknown, max: number): string {
   if (typeof value !== 'string') return '';
   const text = value.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
   return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;

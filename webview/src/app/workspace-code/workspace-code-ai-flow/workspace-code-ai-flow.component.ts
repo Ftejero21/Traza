@@ -88,6 +88,8 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   /** Paso con el menú de acciones abierto (`null` = ninguno). */
   stepMenu: number | null = null;
   private stepMenuTimer: ReturnType<typeof setTimeout> | null = null;
+  private stepMenuRaf: number | null = null;
+  private stepMenuRetry: ReturnType<typeof setTimeout> | null = null;
   readonly speeds: (0.5 | 1 | 2)[] = [0.5, 1, 2];
   private readonly baseModes: { id: FlowMode; icon: string; key: string }[] = [
     { id: 'walk', icon: 'bi-play-circle', key: 'aiFlow.mode.walk' },
@@ -126,9 +128,22 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   /** Vista previa: temporizador de la colocación, scroll pendiente y resultado mostrado la última vez. */
   private previewTimer: ReturnType<typeof setTimeout> | null = null;
   /** Estilos inline previos del diagrama mientras está ampliado para que quepa el popup. */
-  private diagramSavedStyle: { minHeight: string; flexShrink: string } | null = null;
+  private diagramSavedStyle: {
+    minHeight: string;
+    panel: HTMLElement | null;
+    panelFlexShrink: string;
+    panelMinHeight: string;
+  } | null = null;
+  /** Lado del popup en la última colocación (se conserva mientras siga cabiendo, para evitar saltos). */
+  private previewSide: 'above' | 'below' | null = null;
+  private previewSideKey: string | null = null;
+  /** Observa popup, diagrama y `#main`: su tamaño cambia sin que cambie el de `root`. */
+  private previewObserver: ResizeObserver | null = null;
+  private observedNodes: Element[] = [];
   private previewScroll: PreviewScroll = 'none';
   private previewKey: object | null = null;
+  /** Geometría del popup en la última colocación: solo se desplaza el scroll cuando cambia. */
+  private previewGeomKey: string | null = null;
 
   constructor(
     public flowService: WorkspaceCodeAiFlowService,
@@ -197,12 +212,16 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     this.flowService.labMeasure = null;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
+    this.previewObserver?.disconnect();
+    this.previewObserver = null;
+    this.observedNodes = [];
     if (this.scrollTimer) clearTimeout(this.scrollTimer);
     this.scrollTimer = null;
     if (this.previewTimer) clearTimeout(this.previewTimer);
     this.previewTimer = null;
     if (this.stepMenuTimer) clearTimeout(this.stepMenuTimer);
     this.stepMenuTimer = null;
+    this.cancelStepMenuPlacement();
     this.restoreDiagramHeight();
     this.endDrag();
     this.sub.unsubscribe();
@@ -379,8 +398,61 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   openStepMenu(index: number): void {
     this.cancelStepMenuClose();
     if (this.stepMenu === index) return;
+    this.cancelStepMenuPlacement();
     this.stepMenu = index;
     this.cdr.markForCheck();
+    this.zone.runOutsideAngular(() => {
+      this.stepMenuRaf = requestAnimationFrame(() => {
+        this.stepMenuRaf = null;
+        if (this.destroyed || this.stepMenu !== index) return;
+        if (!this.placeStepMenu(index)) {
+          this.stepMenuRetry = setTimeout(() => {
+            this.stepMenuRetry = null;
+            if (!this.destroyed && this.stepMenu === index) this.placeStepMenu(index);
+          }, 0);
+        }
+      });
+    });
+  }
+
+  private cancelStepMenuPlacement(): void {
+    if (this.stepMenuRaf !== null) cancelAnimationFrame(this.stepMenuRaf);
+    this.stepMenuRaf = null;
+    if (this.stepMenuRetry) clearTimeout(this.stepMenuRetry);
+    this.stepMenuRetry = null;
+  }
+
+  /**
+   * Coloca el menú del paso en el espacio visible del diagrama (debajo de la fila; si no cabe, encima; si no, ajustado
+   * al área visible) para que `.wcf__diagram{overflow:auto}` no lo recorte. `false` si aún no está en el DOM.
+   */
+  private placeStepMenu(index: number): boolean {
+    const canvas = this.canvas?.nativeElement;
+    const row = canvas?.querySelector<HTMLElement>(`.wcf-row[data-step="${index}"]`);
+    const menu = row?.querySelector<HTMLElement>('.wcf-stepmenu');
+    if (!row || !menu) return false;
+    menu.style.top = '';
+    menu.style.maxHeight = '';
+    menu.style.bottom = 'auto';
+    const vis = this.diagramVisibleRect();
+    if (vis) {
+      const rRect = row.getBoundingClientRect();
+      const visTop = vis.top - rRect.top + 4;
+      const visBottom = vis.bottom - rRect.top - 4;
+      const h = menu.offsetHeight;
+      const rowH = row.offsetHeight;
+      let top: number;
+      if (6 + h <= visBottom) top = 6;
+      else if (rowH - 6 - h >= visTop) top = rowH - 6 - h;
+      else top = Math.max(visTop, Math.min(6, visBottom - h));
+      if (h > visBottom - visTop) {
+        menu.style.maxHeight = `${Math.max(0, Math.floor(visBottom - visTop))}px`;
+        top = visTop;
+      }
+      menu.style.top = `${Math.round(top)}px`;
+    }
+    menu.classList.add('is-placed');
+    return true;
   }
 
   scheduleStepMenuClose(): void {
@@ -388,6 +460,7 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     this.stepMenuTimer = setTimeout(() => {
       this.stepMenuTimer = null;
       if (this.destroyed || this.stepMenu === null) return;
+      this.cancelStepMenuPlacement();
       this.stepMenu = null;
       this.cdr.markForCheck();
     }, STEP_MENU_CLOSE_MS);
@@ -398,13 +471,9 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     this.stepMenuTimer = null;
   }
 
-  /** En los 3 últimos pasos el menú se abre hacia arriba. */
-  menuUp(index: number): boolean {
-    return index >= (this.flow?.steps.length ?? 0) - 3;
-  }
-
   private closeStepMenu(): void {
     this.cancelStepMenuClose();
+    this.cancelStepMenuPlacement();
     this.stepMenu = null;
     this.cdr.markForCheck();
   }
@@ -474,7 +543,9 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
       if (view) {
         const crop = view.frame.crop;
         const tw = Math.max(1, (popup.offsetWidth || PREVIEW_WIDTH) - THUMB_INSET);
-        const s = Math.min(1, tw / Math.max(1, crop.w));
+        const s = view.frame.contain
+          ? Math.min(1, tw / Math.max(1, crop.w), THUMB_MAX_H / Math.max(1, crop.h))
+          : Math.min(1, tw / Math.max(1, crop.w));
         const th = Math.min(THUMB_MAX_H, Math.max(THUMB_MIN_H, Math.round(crop.h * s)));
         thumb.style.width = `${tw}px`;
         thumb.style.height = `${th}px`;
@@ -557,21 +628,78 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     });
   }
 
+  /**
+   * Área realmente visible del diagrama en coordenadas de viewport: su zona cliente intersecada con `#main` y con la
+   * ventana. `null` si no hay diagrama o no queda nada visible.
+   */
+  private diagramVisibleRect(): { top: number; bottom: number; left: number; right: number } | null {
+    const diagram = this.diagram?.nativeElement;
+    if (!diagram) return null;
+    const d = diagram.getBoundingClientRect();
+    let top = d.top + diagram.clientTop;
+    let bottom = top + diagram.clientHeight;
+    let left = d.left + diagram.clientLeft;
+    let right = left + diagram.clientWidth;
+    const main = this.main?.nativeElement;
+    if (main) {
+      const m = main.getBoundingClientRect();
+      top = Math.max(top, m.top);
+      bottom = Math.min(bottom, m.bottom);
+      left = Math.max(left, m.left);
+      right = Math.min(right, m.right);
+    }
+    top = Math.max(top, 0);
+    left = Math.max(left, 0);
+    bottom = Math.min(bottom, window.innerHeight);
+    right = Math.min(right, window.innerWidth);
+    return bottom > top && right > left ? { top, bottom, left, right } : null;
+  }
+
+  /** Observa popup, diagrama y `#main` (los tres van con `*ngIf`): se re-observa cuando cambia la identidad del nodo. */
+  private syncPreviewObserver(): void {
+    if (typeof ResizeObserver === 'undefined') return;
+    const nodes = [this.uiPreview?.nativeElement, this.diagram?.nativeElement, this.main?.nativeElement].filter(
+      (n): n is HTMLElement => !!n,
+    );
+    if (!this.previewObserver) {
+      this.zone.runOutsideAngular(() => {
+        this.previewObserver = new ResizeObserver(() => this.schedulePreviewLayout());
+      });
+    }
+    const observer = this.previewObserver;
+    if (!observer) return;
+    const old = this.observedNodes;
+    if (nodes.length === old.length && nodes.every((n, i) => n === old[i])) return;
+    for (const n of old) if (!nodes.includes(n as HTMLElement)) observer.unobserve(n);
+    for (const n of nodes) if (!old.includes(n)) observer.observe(n);
+    this.observedNodes = nodes;
+  }
+
   /** Coloca el popup junto a la flecha del paso ancla (encima o debajo) y hace crecer el canvas si no cabe. */
   private layoutPreview(scroll: PreviewScroll): void {
+    this.syncPreviewObserver();
     const canvas = this.canvas?.nativeElement;
     if (!canvas) return;
     const popup = this.uiPreview?.nativeElement;
     const ctx = this.preview.ctx;
     canvas.style.paddingBottom = '';
     if (!popup || !ctx || !this.preview.open || this.preview.screenStep < 0) {
+      this.previewGeomKey = null;
+      this.previewSide = null;
+      this.previewSideKey = null;
       this.restoreDiagramHeight();
       return;
     }
     const row = canvas.querySelector<HTMLElement>(`.wcf-row[data-step="${this.preview.screenStep}"]`);
     if (!row) {
+      this.previewGeomKey = null;
       this.restoreDiagramHeight();
       return;
+    }
+    const sideKey = `${ctx.key}|${this.preview.screenStep}`;
+    if (sideKey !== this.previewSideKey) {
+      this.previewSideKey = sideKey;
+      this.previewSide = null;
     }
     const grew = this.fitDiagramHeight(popup);
     const target = row.querySelector<HTMLElement>('.wcf-arrow, .wcf-loop') ?? row;
@@ -586,73 +714,128 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     const total = this.flow?.steps.length ?? 0;
     const rowTop = rRect.top - cRect.top;
     const rowBottom = rRect.bottom - cRect.top;
+    const rowH = rRect.height;
     const aboveTop = rowTop - height - PREVIEW_GAP;
-    // Entre los 3 últimos pasos: encima de la fila (si cabe); si no, debajo, tapando los pasos tachados.
-    const top = this.preview.screenStep >= total - 3 && aboveTop >= PREVIEW_MIN_TOP ? aboveTop : rowBottom + PREVIEW_GAP;
+    const belowTop = rowBottom + PREVIEW_GAP;
+    // Area visible real del diagrama en coordenadas del canvas: el popup debe quedar dentro.
+    const vis = this.diagramVisibleRect();
+    const visTop = vis ? vis.top - cRect.top : Number.NEGATIVE_INFINITY;
+    const visBottom = vis ? vis.bottom - cRect.top : Number.POSITIVE_INFINITY;
+    const fitsBelow = belowTop + height <= visBottom - PREVIEW_GUTTER;
+    const fitsAbove = aboveTop >= Math.max(PREVIEW_MIN_TOP, visTop + PREVIEW_GUTTER);
+    // En los 3 ultimos pasos se prueba primero encima; en el resto, debajo.
+    const preferAbove = this.preview.screenStep >= total - 3;
+    const previous = this.previewSide;
+    let top: number;
+    let side: 'above' | 'below' | null = null;
+    let needReveal = false;
+    if (previous === 'above' && fitsAbove) side = 'above';
+    else if (previous === 'below' && fitsBelow) side = 'below';
+    else if (preferAbove && fitsAbove) side = 'above';
+    else if (fitsBelow) side = 'below';
+    else if (fitsAbove) side = 'above';
+    if (side) {
+      top = side === 'above' ? aboveTop : belowTop;
+    } else if (vis && height + rowH + PREVIEW_GAP <= visBottom - visTop - 2 * PREVIEW_GUTTER) {
+      // No cabe con el scroll actual: se elige un lado y se desplaza el diagrama para verlo junto a la fila.
+      const above = aboveTop >= PREVIEW_MIN_TOP && (preferAbove || rowTop - visTop > visBottom - rowBottom);
+      side = above ? 'above' : 'below';
+      top = above ? aboveTop : belowTop;
+      needReveal = true;
+    } else {
+      // Ni así cabe: se encaja en el área visible (puede tapar la fila).
+      const lo = visTop + PREVIEW_GUTTER;
+      const hi = visBottom - PREVIEW_GUTTER - height;
+      top = Math.max(PREVIEW_MIN_TOP, Math.min(Math.max(belowTop, lo), hi));
+    }
+    this.previewSide = side;
     popup.style.left = `${Math.round(left)}px`;
     popup.style.top = `${Math.round(top)}px`;
     const basePadding = parseFloat(getComputedStyle(canvas).paddingBottom) || 0;
     const extra = top + height + PREVIEW_GUTTER - canvas.offsetHeight;
     if (extra > 0) canvas.style.paddingBottom = `${Math.ceil(basePadding + extra)}px`;
-    if (grew) {
-      this.revealInDiagram(popup);
-      return;
+    const key = `${this.preview.screenStep}|${Math.round(top)}|${Math.round(left)}|${height}|${width}`;
+    const geomChanged = key !== this.previewGeomKey;
+    this.previewGeomKey = key;
+    let hidden = false;
+    if (vis) {
+      const pRect = popup.getBoundingClientRect();
+      hidden = pRect.top < vis.top || pRect.bottom > vis.bottom || pRect.left < vis.left || pRect.right > vis.right;
     }
-    if (scroll === 'none') return;
-    const diagram = this.diagram?.nativeElement;
-    if (!diagram) return;
-    const dRect = diagram.getBoundingClientRect();
-    const pRect = popup.getBoundingClientRect();
-    const hidden = pRect.top < dRect.top || pRect.bottom > dRect.bottom || pRect.left < dRect.left || pRect.right > dRect.right;
-    if (scroll === 'force' || hidden) this.revealInDiagram(popup);
-  }
-
-  /** Desplaza solo el área del diagrama hasta el popup (`scrollIntoView` movería también la cabecera del flujo). */
-  private revealInDiagram(popup: HTMLElement): void {
-    const diagram = this.diagram?.nativeElement;
-    if (!diagram) return;
-    const dRect = diagram.getBoundingClientRect();
-    const pRect = popup.getBoundingClientRect();
-    if (pRect.bottom > dRect.bottom) diagram.scrollTop += Math.min(pRect.bottom - dRect.bottom, pRect.top - dRect.top);
-    else if (pRect.top < dRect.top) diagram.scrollTop -= dRect.top - pRect.top;
-    if (pRect.right > dRect.right) diagram.scrollLeft += pRect.right - dRect.right;
-    else if (pRect.left < dRect.left) diagram.scrollLeft -= dRect.left - pRect.left;
+    if (grew || scroll === 'force' || ((hidden || needReveal) && (geomChanged || scroll === 'ifHidden'))) {
+      this.revealInDiagram(popup, row);
+    }
   }
 
   /**
-   * Si el área visible del diagrama es más baja que el popup (alto real + margen), la amplía con estilos inline
-   * temporales (`min-height` gana al `height` fijo de `changes` y al encogimiento flex de `sim`). Devuelve `true`
-   * cuando acaba de ampliarla.
+   * Desplaza solo el área del diagrama hasta el popup (`scrollIntoView` movería también la cabecera del flujo): deja a la
+   * vista popup y fila si caben juntos en el alto visible; si no, solo el popup.
+   */
+  private revealInDiagram(popup: HTMLElement, row: HTMLElement): void {
+    const diagram = this.diagram?.nativeElement;
+    const vis = this.diagramVisibleRect();
+    if (!diagram || !vis) return;
+    const pRect = popup.getBoundingClientRect();
+    const rRect = row.getBoundingClientRect();
+    const visH = vis.bottom - vis.top;
+    const uTop = Math.min(pRect.top, rRect.top);
+    const uBottom = Math.max(pRect.bottom, rRect.bottom);
+    const both = uBottom - uTop <= visH - 2 * PREVIEW_GUTTER;
+    const tTop = both ? uTop : pRect.top;
+    const tBottom = both ? uBottom : pRect.bottom;
+    const limitBottom = vis.bottom - PREVIEW_GUTTER;
+    const limitTop = vis.top + PREVIEW_GUTTER;
+    if (tBottom > limitBottom) diagram.scrollTop += Math.max(0, Math.min(tBottom - limitBottom, tTop - limitTop));
+    else if (tTop < limitTop) diagram.scrollTop -= limitTop - tTop;
+    const limitRight = vis.right - PREVIEW_GUTTER;
+    const limitLeft = vis.left + PREVIEW_GUTTER;
+    if (pRect.right > limitRight) diagram.scrollLeft += Math.max(0, Math.min(pRect.right - limitRight, pRect.left - limitLeft));
+    else if (pRect.left < limitLeft) diagram.scrollLeft -= limitLeft - pRect.left;
+  }
+
+  /**
+   * Si el área visible del diagrama es más baja que el popup (alto real + margen), la amplía con `min-height` inline
+   * temporal (gana al `height` fijo de `changes` y al encogimiento flex de `sim`) y deja que el panel inferior encoja
+   * (con su scroll interno) en vez de quedar empujado fuera de la vista. Devuelve `true` cuando cambia el `min-height`.
    */
   private fitDiagramHeight(popup: HTMLElement): boolean {
     const diagram = this.diagram?.nativeElement;
     if (!diagram) return false;
-    const wasGrown = !!this.diagramSavedStyle;
-    const previousMin = diagram.style.minHeight;
+    const previousMin = this.diagramSavedStyle ? diagram.style.minHeight : null;
     this.restoreDiagramHeight();
+    if (popup.offsetHeight <= 0) return false;
     const need = Math.ceil(popup.offsetHeight + 24);
-    if (popup.offsetHeight <= 0 || diagram.clientHeight >= need) return false;
-    const base = diagram.clientHeight;
-    this.diagramSavedStyle = { minHeight: diagram.style.minHeight, flexShrink: diagram.style.flexShrink };
-    diagram.style.minHeight = `${need}px`;
-    diagram.style.flexShrink = '0';
-    // Solo crece hasta el espacio libre del flujo: si desborda, la cabecera y el reproductor quedarían tapados.
-    const root = this.root?.nativeElement;
-    const overflow = root ? root.scrollHeight - root.clientHeight : 0;
-    if (overflow > 0) diagram.style.minHeight = `${Math.max(base, need - overflow)}px`;
-    if (root) root.scrollTop = 0;
-    return !wasGrown || previousMin !== diagram.style.minHeight;
+    const main = this.main?.nativeElement;
+    const split = main?.querySelector<HTMLElement>('.wcf__split');
+    const max = main ? main.clientHeight - (split?.offsetHeight ?? 0) - 4 : need;
+    const target = Math.floor(Math.min(need, max));
+    if (target <= 0 || diagram.clientHeight >= target) return false;
+    const panel = this.lab?.nativeElement ?? this.detail?.nativeElement ?? null;
+    this.diagramSavedStyle = {
+      minHeight: diagram.style.minHeight,
+      panel,
+      panelFlexShrink: panel?.style.flexShrink ?? '',
+      panelMinHeight: panel?.style.minHeight ?? '',
+    };
+    diagram.style.minHeight = `${target}px`;
+    if (panel) {
+      panel.style.flexShrink = '1';
+      panel.style.minHeight = '0';
+    }
+    return previousMin !== diagram.style.minHeight;
   }
 
-  /** Restaura los estilos inline previos del diagrama (popup cerrado, otro resultado o destrucción). */
+  /** Restaura los estilos inline previos del diagrama y del panel inferior (popup cerrado, otro resultado o destrucción). */
   private restoreDiagramHeight(): void {
     const saved = this.diagramSavedStyle;
     if (!saved) return;
     this.diagramSavedStyle = null;
     const diagram = this.diagram?.nativeElement;
-    if (!diagram) return;
-    diagram.style.minHeight = saved.minHeight;
-    diagram.style.flexShrink = saved.flexShrink;
+    if (diagram) diagram.style.minHeight = saved.minHeight;
+    if (saved.panel) {
+      saved.panel.style.flexShrink = saved.panelFlexShrink;
+      saved.panel.style.minHeight = saved.panelMinHeight;
+    }
   }
 
   /* ---------------------------- validador ---------------------------- */

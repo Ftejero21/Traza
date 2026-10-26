@@ -41,7 +41,7 @@
               <span class="wcf-num">{{ stepNumberText(i) }}</span>
             </span>
             <!-- Menú de acciones del paso (se abre al pasar el ratón por el número) -->
-            <div class="wcf-stepmenu" *ngIf="stepMenu === i" [class.is-up]="menuUp(i)" role="menu"
+            <div class="wcf-stepmenu" *ngIf="stepMenu === i" role="menu"
               [attr.aria-label]="'aiFlow.stepMenu.label' | wcT: { n: i + 1 }"
               (mouseenter)="cancelStepMenuClose()" (mouseleave)="scheduleStepMenuClose()" (click)="$event.stopPropagation()">
               <div class="wcf-stepmenu__head">
@@ -136,6 +136,9 @@
             <p class="wcf-uip__caption" [title]="v.caption">{{ v.caption }}</p>
             <p class="wcf-uip__approx" *ngIf="v.approximate">
               <i class="bi bi-exclamation-circle" aria-hidden="true"></i>{{ 'aiFlow.screen.approx' | wcT }}
+            </p>
+            <p class="wcf-uip__deps" *ngIf="v.missingDeps" role="note">
+              <i class="bi bi-box-seam" aria-hidden="true"></i>{{ 'aiFlow.screen.missingDeps' | wcT }}
             </p>
             <p class="wcf-uip__local"><i class="bi bi-stars" aria-hidden="true"></i>{{ 'aiFlow.screen.footer' | wcT }}</p>
           </footer>
@@ -387,6 +390,9 @@
       <button type="button" class="wcf-uip__close" [title]="'aiFlow.screen.zoomClose' | wcT" [attr.aria-label]="'aiFlow.screen.zoomClose' | wcT"
         (click)="preview.closeZoom()"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
     </header>
+    <p class="wcf-uip-zoom__deps" *ngIf="previewView?.missingDeps" role="note">
+      <i class="bi bi-box-seam" aria-hidden="true"></i> {{ 'aiFlow.screen.missingDeps' | wcT }}
+    </p>
     <div class="wcf-uip-zoom__body" #uiZoomBody>
       <div class="wcf-uip-zoom__stage" #uiZoomStage [class.is-busy]="preview.viewportBusy">
         <iframe #uiZoomFrame class="wcf-uip-zoom__frame" sandbox="" referrerpolicy="no-referrer" tabindex="-1" [title]="'aiFlow.preview.frame' | wcT"></iframe>
