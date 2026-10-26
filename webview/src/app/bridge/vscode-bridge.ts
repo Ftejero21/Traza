@@ -2,7 +2,11 @@ import { Observable, Subject } from 'rxjs';
 import { NexoBridge } from './nexo-bridge';
 import { BridgeRequest, HostToWebview, WebviewToHost } from './protocol';
 
-declare function acquireVsCodeApi(): { postMessage(message: unknown): void };
+declare function acquireVsCodeApi(): { postMessage(message: unknown): void; getState(): unknown; setState(state: unknown): void };
+
+function plainState(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
 
 const HOST_TYPES = new Set(['init', 'config', 'openFlow', 'response', 'filesChanged', 'fileSaved']);
 
@@ -57,6 +61,24 @@ export class VsCodeBridge extends NexoBridge {
     const error = new Error('cancelled');
     error.name = 'AbortError';
     entry.reject(error);
+  }
+
+  override getUiState(key: string): unknown {
+    try {
+      return plainState(this.api.getState())[key];
+    } catch (error: unknown) {
+      console.warn('[Nexo] No se pudo leer el estado de la vista.', error instanceof Error ? error.name : '');
+      return undefined;
+    }
+  }
+
+  override setUiState(key: string, value: unknown): void {
+    try {
+      const prev = plainState(this.api.getState());
+      this.api.setState({ ...prev, [key]: value });
+    } catch (error: unknown) {
+      console.warn('[Nexo] No se pudo guardar el estado de la vista.', error instanceof Error ? error.name : '');
+    }
   }
 
   post(msg: WebviewToHost): void {

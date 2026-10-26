@@ -970,7 +970,13 @@ function bindProperty(el: Element, prop: string, expr: string, locals: Locals, r
       if (el.localName === 'textarea') el.textContent = toText(r.value);
     }
   }
-  // [src], [href], [routerLink] y cualquier otra entrada de componente: se quitan.
+  if (prop === 'src' || prop === 'ngsrc') {
+    // Ruta evaluada (defaults del .ts o bindings del plan): el servicio la incrusta como data URI o pone el placeholder.
+    const r = evalOrFlag(expr, locals, run);
+    if (r.ok && typeof r.value === 'string' && r.value.trim()) el.setAttribute('src', r.value.trim());
+    return;
+  }
+  // [href], [routerLink] y cualquier otra entrada de componente: se quitan.
 }
 
 function processAttributes(el: Element, locals: Locals, run: Run): void {
@@ -1744,14 +1750,51 @@ export const NEXO_OVERLAY_CSS = [
 
 const CSP = `default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:`;
 
+/** `url(...)` y cadenas (se devuelven sin tocar) o número + unidad de viewport. */
+const VIEWPORT_UNIT_RE =
+  /(url\([^)]*\))|("(?:[^"\\\n]|\\.)*")|('(?:[^'\\\n]|\\.)*')|(^|[^\w.#-])(-?(?:\d+\.\d+|\d+|\.\d+))(dvh|svh|lvh|vh|dvw|svw|lvw|vw|dvmin|svmin|lvmin|vmin|dvmax|svmax|lvmax|vmax)(?![\w-])/gi;
+
+/**
+ * Congela las unidades de viewport (`vh`, `vw`, `vmin`, `vmax` y variantes `s`/`l`/`d`) en px según el viewport
+ * simulado: los iframes visibles tienen el alto del documento y, sin esto, las `vh` se recalcularían sobre él.
+ * Solo sustituye número + unidad por número en px (CSS ya saneado); no toca `url(...)`, cadenas ni selectores.
+ */
+export function freezeViewportUnits(css: string, width: number, height: number): string {
+  if (!css) return css;
+  return css.replace(VIEWPORT_UNIT_RE, (m: string, url?: string, dq?: string, sq?: string, pre?: string, num?: string, unit?: string) => {
+    if (url !== undefined || dq !== undefined || sq !== undefined || num === undefined || unit === undefined) return m;
+    const u = unit.toLowerCase();
+    const dim = u.endsWith('vmin') ? Math.min(width, height)
+      : u.endsWith('vmax') ? Math.max(width, height)
+        : u.endsWith('vh') ? height : width;
+    const n = parseFloat(num);
+    if (!Number.isFinite(n)) return m;
+    return `${pre ?? ''}${Number((n * dim / 100).toFixed(3))}px`;
+  });
+}
+
 /** Documento del iframe (CSS ya saneado con `sanitizeCss`; HTML ya saneado con `sanitizeFragmentDom`). */
-export function buildSrcdoc(p: { globalCss: string; componentCss: string; html: string; tone: UiPreviewTone }): string {
+export function buildSrcdoc(p: {
+  globalCss: string; componentCss: string; html: string; tone: UiPreviewTone; viewport: { width: number; height: number };
+}): string {
   const tone: UiPreviewTone = p.tone === 'red' || p.tone === 'green' ? p.tone : 'amber';
+  const { width, height } = p.viewport;
+  const globalCss = freezeViewportUnits(p.globalCss, width, height);
+  const componentCss = freezeViewportUnits(p.componentCss, width, height);
   return '<!doctype html><html><head><meta charset="utf-8">'
     + `<meta http-equiv="Content-Security-Policy" content="${CSP}">`
-    + `<style>${NEXO_BASE_CSS}</style><style>${p.globalCss}</style><style>${p.componentCss}</style><style>${NEXO_OVERLAY_CSS}</style>`
+    + `<style>${NEXO_BASE_CSS}</style><style>${globalCss}</style><style>${componentCss}</style><style>${NEXO_OVERLAY_CSS}</style>`
     + `</head><body data-nx-tone="${tone}">${p.html}</body></html>`;
 }
+
+/** Imagen neutra para las imágenes remotas o no resueltas (SVG estático, sin enlaces). */
+export const NX_IMAGE_PLACEHOLDER = 'data:image/svg+xml,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="100" viewBox="0 0 160 100">'
+  + '<rect width="160" height="100" fill="#e5e7eb"/>'
+  + '<circle cx="118" cy="32" r="11" fill="#9ca3af"/>'
+  + '<path d="M18 84 L58 40 L84 66 L102 50 L142 84 Z" fill="#9ca3af"/>'
+  + '</svg>',
+);
 
 /** Quita los data URI (para no superar el tamaño máximo del `srcdoc`). */
 export function stripInlineAssets(srcdoc: string): string {

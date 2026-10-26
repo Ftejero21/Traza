@@ -1,5 +1,6 @@
 import { Injectable, OnDestroy } from '@angular/core';
 import { Subject } from 'rxjs';
+import { NexoBridge } from '../../bridge/nexo-bridge';
 import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
 import { NexoProjectService } from '../../project/nexo-project.service';
 import {
@@ -17,6 +18,7 @@ import { applyFileChange, resolveChangeTarget, safeRelativePath, sha256Hex } fro
 import { maskConfigSecrets, maskSensitiveText } from '../ai/workspace-code-ai-mask';
 import { FlowRefValidator } from '../ai/workspace-code-flow-ref-validator';
 import { sanitizeUiPreviewPlan } from '../ai/workspace-code-flow-sanitize';
+import { isContextExcludedDir } from '../ai/workspace-code-context-exclude';
 import { compileScss } from '../ai/workspace-code-scss-compiler';
 import {
   ComponentMeta,
@@ -31,6 +33,8 @@ import {
   tsMethods,
 } from '../ai/workspace-code-ui-component';
 import {
+  NX_IMAGE_PLACEHOLDER,
+  UiPreviewTone,
   UiPreviewVariant,
   applyContentAttr,
   buildSrcdoc,
@@ -48,14 +52,67 @@ import { UiPlanRequest, UiScreenContext, WorkspaceCodeAiFlowService } from './wo
 export type UiPreviewTab = UiPreviewVariant;
 export type UiScreenStatus = 'idle' | 'loading' | 'ready' | 'error';
 
+/** Tamaños de pantalla de la vista. */
+export type UiViewportId = 'desktop' | 'laptop' | 'tablet' | 'mobile';
+
+export interface UiViewportSpec {
+  id: UiViewportId;
+  width: number;
+  height: number;
+  /** Clase de Bootstrap Icons. */
+  icon: string;
+  /** Clave i18n con nombre y medidas. */
+  key: string;
+}
+
+export const UI_VIEWPORTS: readonly UiViewportSpec[] = [
+  { id: 'desktop', width: 1920, height: 1080, icon: 'bi-display', key: 'aiFlow.screen.vp.desktop' },
+  { id: 'laptop', width: 1280, height: 800, icon: 'bi-laptop', key: 'aiFlow.screen.vp.laptop' },
+  { id: 'tablet', width: 768, height: 1024, icon: 'bi-tablet', key: 'aiFlow.screen.vp.tablet' },
+  { id: 'mobile', width: 390, height: 844, icon: 'bi-phone', key: 'aiFlow.screen.vp.mobile' },
+];
+
 /** Vista pintada de una pestaña («Ahora» / «Con el cambio»). */
 export interface UiScreenView {
   srcdoc: string;
   approximate: boolean;
   caption: string;
   state: UiPreviewState;
-  /** Documento a 1280 de ancho; `crop` = encuadre (raíz del plan) en píxeles del documento. */
-  frame: { width: number; height: number; crop: { x: number; y: number; w: number; h: number } };
+  /** Tamaño de pantalla con el que se calculó. */
+  viewport: UiViewportId;
+  /**
+   * Documento al ancho del tamaño elegido: `width` = ancho del viewport, `height` = alto del documento,
+   * `viewportHeight` = alto de la ventana simulada; `crop` = encuadre (raíz del plan) en píxeles del documento.
+   */
+  frame: { width: number; height: number; viewportHeight: number; crop: { x: number; y: number; w: number; h: number } };
+}
+
+/** Partes de una variante independientes del tamaño de pantalla (CSS y HTML ya saneados). */
+interface ViewParts {
+  globalCss: string;
+  componentCss: string;
+  html: string;
+  tone: UiPreviewTone;
+  root: string;
+  caption: string;
+  state: UiPreviewState;
+  approximate: boolean;
+}
+
+type PartsPair = { now?: ViewParts; after?: ViewParts };
+type ViewPair = { now?: UiScreenView; after?: UiScreenView };
+
+interface AssetMapping {
+  /** Prefijo de URL servido (`assets/`, `''`) o URL exacta si `exact`. */
+  url: string;
+  /** Carpeta (o archivo si `exact`) relativa al montaje. */
+  dir: string;
+  exact: boolean;
+}
+
+interface AngularBuildConfig {
+  styles: string[];
+  assets: AssetMapping[];
 }
 
 /** Componente de la pantalla resuelto a partir del paso ancla. */
@@ -93,6 +150,8 @@ interface RenderEnv {
   approximate: boolean;
   /** Assets ya incrustados (ruta → data URI o `null`). */
   assets: Map<string, string | null>;
+  /** `angular.json` del montaje (`undefined` = aún no leído; `null` = no existe o no es válido). */
+  angular?: AngularBuildConfig | null;
 }
 
 interface ScreenBuild {
@@ -125,8 +184,8 @@ class ScreenError extends Error {
   }
 }
 
-const VIEWPORT_W = 1280;
-const VIEWPORT_H = 800;
+const DEFAULT_VIEWPORT: UiViewportId = 'laptop';
+const VIEWPORT_STATE_KEY = 'uiPreviewViewport';
 const MAX_DOC_H = 4000;
 /** Ancho útil de la miniatura con el popup listo (420 − 22). */
 const THUMB_W = 398;
@@ -134,13 +193,20 @@ const THUMB_MAX_H = 280;
 const CROP_MARGIN = 8;
 const MAX_GLOBAL_CSS = 1536 * 1024;
 const MAX_COMPONENT_CSS = 512 * 1024;
-const MAX_IMAGE_BYTES = 262144;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_SVG_BYTES = 512 * 1024;
 const MAX_FONT_BYTES = 400 * 1024;
 /** Hoja global de un paquete (bootstrap.min.css ronda 230 KB). */
 const MAX_PACKAGE_CSS_BYTES = 600 * 1024;
-const MAX_ASSETS_TOTAL = 3 * 1024 * 1024;
-const MAX_SRCDOC = 6 * 1024 * 1024;
+const MAX_ASSETS_TOTAL = 8 * 1024 * 1024;
+const MAX_SRCDOC = 14 * 1024 * 1024;
 const MAX_CACHE = 30;
+/** Partes renderizadas (pueden llevar imágenes incrustadas: límite bajo). */
+const MAX_RENDER_CACHE = 6;
+/** Vistas por tamaño de la carga actual (LRU). */
+const MAX_VIEW_CACHE = 2;
+/** SVG con contenido activo: se rechaza (placeholder). */
+const SVG_UNSAFE = /<script\b|<foreignObject\b|\son[a-z]+\s*=|javascript:|<!ENTITY/i;
 const MAX_INDEX_FILES = 200;
 const MAX_CHILDREN = 8;
 /** Límites del contrato UI_PLAN (los valida también el backend). */
@@ -193,13 +259,22 @@ function firstElementSelector(selector: string): string {
   return '';
 }
 
-function remember<V>(map: Map<string, V>, key: string, value: V): void {
+function remember<K, V>(map: Map<K, V>, key: K, value: V, max = MAX_CACHE): void {
+  map.delete(key);
   map.set(key, value);
-  while (map.size > MAX_CACHE) {
+  while (map.size > max) {
     const oldest = map.keys().next().value;
     if (oldest === undefined) break;
     map.delete(oldest);
   }
+}
+
+function isViewportId(value: unknown): value is UiViewportId {
+  return typeof value === 'string' && UI_VIEWPORTS.some((v) => v.id === value);
+}
+
+function viewportSpec(id: UiViewportId): UiViewportSpec {
+  return UI_VIEWPORTS.find((v) => v.id === id) ?? UI_VIEWPORTS.find((v) => v.id === DEFAULT_VIEWPORT)!;
 }
 
 /** Recorta CSS por el último cierre de regla antes de `max`. */
@@ -231,16 +306,28 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   /** `nombre.component.ts · .html · .scss`. */
   refLine = '';
   plan: UiPreviewPlan | null = null;
-  views: { now?: UiScreenView; after?: UiScreenView } = {};
+  views: ViewPair = {};
   /** Vista ampliada a tamaño real. */
   zoom = false;
   errorText: string | null = null;
+  /** Tamaño de pantalla elegido (persistido en el estado de la webview). */
+  viewport: UiViewportId = DEFAULT_VIEWPORT;
+  /** Recalculando las vistas para otro tamaño. */
+  viewportBusy = false;
+  readonly viewports = UI_VIEWPORTS;
 
   private loadRun = 0;
   private resolveRun = 0;
+  private viewportRun = 0;
   private pending: UiPlanRequest | null = null;
   private readonly planCache = new Map<string, UiPreviewPlan>();
-  private readonly renderCache = new Map<string, { now?: UiScreenView; after?: UiScreenView }>();
+  private readonly renderCache = new Map<string, PartsPair>();
+  /** Partes de la carga actual (para recalcular otros tamaños sin volver a renderizar). */
+  private parts: PartsPair | null = null;
+  /** Vistas de la carga actual por tamaño (LRU de `MAX_VIEW_CACHE`). */
+  private readonly viewCache = new Map<UiViewportId, ViewPair>();
+  /** Índice perezoso `ruta en minúsculas → archivo` (se rehace si cambia la lista de archivos). */
+  private ciIndex: { files: readonly WorkspaceCodeFile[]; map: Map<string, WorkspaceCodeFile> } | null = null;
   /** Índice de selectores por montaje (selector → ruta del `.ts`). */
   private readonly selectorIndex = new Map<string, Map<string, string>>();
   /** Hijos resueltos por montaje y etiqueta (ruta del `.ts` o `null`). */
@@ -250,11 +337,16 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     private project: NexoProjectService,
     private i18n: WorkspaceCodeI18nService,
     private flowService: WorkspaceCodeAiFlowService,
-  ) {}
+    private bridge: NexoBridge,
+  ) {
+    const saved = this.bridge.getUiState(VIEWPORT_STATE_KEY);
+    this.viewport = isViewportId(saved) ? saved : DEFAULT_VIEWPORT;
+  }
 
   ngOnDestroy(): void {
     this.cancelPlan();
     this.resolveRun++;
+    this.clearViewState();
     this.changed$.complete();
     this.reveal$.complete();
   }
@@ -335,13 +427,69 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     this.changed$.next();
   }
 
+  /**
+   * Cambia el tamaño de pantalla: con la vista lista recalcula srcdoc y medida sobre las partes ya renderizadas
+   * (sin IA ni DOM nuevo) y los cachea por tamaño; si no, solo lo guarda para la próxima carga.
+   */
+  async setViewport(id: UiViewportId): Promise<void> {
+    if (!isViewportId(id) || id === this.viewport || this.viewportBusy) return;
+    const previous = this.viewport;
+    this.viewport = id;
+    this.bridge.setUiState(VIEWPORT_STATE_KEY, id);
+    const parts = this.parts;
+    if (this.status !== 'ready' || !parts) {
+      this.changed$.next();
+      return;
+    }
+    const cached = this.viewCache.get(id);
+    if (cached) {
+      remember(this.viewCache, id, cached, MAX_VIEW_CACHE);
+      this.assignViews(cached);
+      this.changed$.next();
+      return;
+    }
+    const run = ++this.viewportRun;
+    this.viewportBusy = true;
+    this.changed$.next();
+    try {
+      const views = await this.finishViews(parts, viewportSpec(id));
+      if (run !== this.viewportRun) return;
+      remember(this.viewCache, id, views, MAX_VIEW_CACHE);
+      this.assignViews(views);
+    } catch (error: unknown) {
+      if (run !== this.viewportRun) return;
+      console.warn('[Nexo IA] No se pudo cambiar el tamaño de la vista.', error instanceof Error ? error.name : '');
+      this.viewport = previous;
+      this.bridge.setUiState(VIEWPORT_STATE_KEY, previous);
+    } finally {
+      if (run === this.viewportRun) {
+        this.viewportBusy = false;
+        this.changed$.next();
+      }
+    }
+  }
+
   get view(): UiScreenView | null {
     return this.views[this.tab] ?? this.views.now ?? null;
+  }
+
+  private assignViews(views: ViewPair): void {
+    this.views = views;
+    if (this.tab === 'after' && !views.after) this.tab = 'now';
+  }
+
+  /** Descarta las vistas por tamaño y cualquier recálculo en curso. */
+  private clearViewState(): void {
+    this.viewportRun++;
+    this.viewportBusy = false;
+    this.parts = null;
+    this.viewCache.clear();
   }
 
   private reset(): void {
     this.cancelPlan();
     this.resolveRun++;
+    this.clearViewState();
     this.ctx = null;
     this.status = 'idle';
     this.open = false;
@@ -442,6 +590,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     if (!ctx || !target) return;
     this.cancelPlan();
     const run = this.loadRun;
+    this.clearViewState();
     this.status = 'loading';
     this.errorText = null;
     this.zoom = false;
@@ -465,11 +614,16 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         if (!plan) throw new ScreenError(this.i18n.t('aiFlow.screen.failed'));
         remember(this.planCache, build.planKey, plan);
       }
-      const views = await this.renderViews(plan, build, ctx);
+      const parts = await this.renderViews(plan, build, ctx);
+      if (run !== this.loadRun) return;
+      const vp = this.viewport;
+      const views = await this.finishViews(parts, viewportSpec(vp));
       if (run !== this.loadRun) return;
       this.plan = plan;
-      this.views = views;
-      if (this.tab === 'after' && !views.after) this.tab = 'now';
+      this.parts = parts;
+      this.viewCache.clear();
+      remember(this.viewCache, vp, views, MAX_VIEW_CACHE);
+      this.assignViews(views);
       this.status = 'ready';
       this.changed$.next();
     } catch (error: unknown) {
@@ -833,7 +987,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
 
   /* ---------------------------- render ---------------------------- */
 
-  private async renderViews(plan: UiPreviewPlan, build: ScreenBuild, ctx: UiScreenContext): Promise<{ now?: UiScreenView; after?: UiScreenView }> {
+  /** Partes de «Ahora» / «Con el cambio» (independientes del tamaño de pantalla; cacheadas por plan y archivos). */
+  private async renderViews(plan: UiPreviewPlan, build: ScreenBuild, ctx: UiScreenContext): Promise<PartsPair> {
     const key = await sha256Hex(JSON.stringify(plan) + '\u0000' + build.filesKey);
     const cached = this.renderCache.get(key);
     if (cached) return cached;
@@ -852,7 +1007,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     globalCss = sanitizeCss(globalCss);
     const proposal = ctx.proposal;
     const baseApprox = env.approximate;
-    const views: { now?: UiScreenView; after?: UiScreenView } = {};
+    const views: PartsPair = {};
     for (const variant of (proposal ? ['now', 'after'] : ['now']) as UiPreviewVariant[]) {
       env.approximate = baseApprox;
       let sources = { root: build.root, children: build.children };
@@ -874,12 +1029,36 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       const body = variant === 'after' ? plan.after ?? null : plan;
       const planBody = body ?? plan;
-      const view = await this.renderPlan(planBody, sources.root, sources.children, globalCss, variant, env);
-      if (patchApprox || (variant === 'after' && !plan.after)) view.approximate = true;
-      views[variant] = view;
+      const parts = await this.renderParts(planBody, sources.root, sources.children, globalCss, variant, env);
+      if (patchApprox || (variant === 'after' && !plan.after)) parts.approximate = true;
+      views[variant] = parts;
     }
-    remember(this.renderCache, key, views);
+    remember(this.renderCache, key, views, MAX_RENDER_CACHE);
     return views;
+  }
+
+  /** srcdoc + medida de cada variante para un tamaño de pantalla. */
+  private async finishViews(parts: PartsPair, vp: UiViewportSpec): Promise<ViewPair> {
+    const out: ViewPair = {};
+    for (const variant of ['now', 'after'] as UiPreviewVariant[]) {
+      const p = parts[variant];
+      if (!p) continue;
+      let approximate = p.approximate;
+      let srcdoc = buildSrcdoc({
+        globalCss: p.globalCss,
+        componentCss: p.componentCss,
+        html: p.html,
+        tone: p.tone,
+        viewport: { width: vp.width, height: vp.height },
+      });
+      if (srcdoc.length > MAX_SRCDOC) {
+        srcdoc = stripInlineAssets(srcdoc);
+        approximate = true;
+      }
+      const frame = await this.measureFrame(srcdoc, p.root, vp);
+      out[variant] = { srcdoc, approximate, caption: p.caption, state: p.state, viewport: vp.id, frame };
+    }
+    return out;
   }
 
   /** Aplica (o invierte) el diff en memoria sobre los archivos leídos. */
@@ -911,8 +1090,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     return { sources: { root: patchComponent(sources.root), children: sources.children.map(patchComponent) }, approximate };
   }
 
-  private async renderPlan(plan: Omit<UiPreviewPlan, 'after'>, root: ComponentSource, children: ComponentSource[], globalCss: string,
-    variant: UiPreviewVariant, env: RenderEnv): Promise<UiScreenView> {
+  private async renderParts(plan: Omit<UiPreviewPlan, 'after'>, root: ComponentSource, children: ComponentSource[], globalCss: string,
+    variant: UiPreviewVariant, env: RenderEnv): Promise<ViewParts> {
     let approximate = false;
     // 1. Plantilla del componente (valores por defecto del .ts + bindings del plan).
     const resolved = resolveTemplate(root.html.text, {
@@ -1021,18 +1200,15 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     await addCss(root, 'nx-c0');
     for (const { source, id } of used) await addCss(source, id);
 
-    let srcdoc = buildSrcdoc({ globalCss, componentCss: sanitizeCss(componentCss), html: doc.body.innerHTML, tone: uiToneOf(plan.state) });
-    if (srcdoc.length > MAX_SRCDOC) {
-      srcdoc = stripInlineAssets(srcdoc);
-      approximate = true;
-    }
-    const frame = await this.measureFrame(srcdoc, plan.root);
     return {
-      srcdoc,
-      approximate: approximate || env.approximate,
+      globalCss,
+      componentCss: sanitizeCss(componentCss),
+      html: doc.body.innerHTML,
+      tone: uiToneOf(plan.state),
+      root: plan.root,
       caption: plan.caption,
       state: plan.state,
-      frame,
+      approximate: approximate || env.approximate,
     };
   }
 
@@ -1044,30 +1220,47 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     return this.inlineCssAssets(r.css, sheet.path, env);
   }
 
+  /**
+   * Imágenes locales como data URI: `src`, `ngSrc` o la primera URL de `srcset` de cada `<img>` (las remotas o no
+   * resueltas usan un placeholder y marcan la vista aproximada) y los `url()` de los `style` inline.
+   */
   private async inlineImages(root: Element, fromPath: string, env: RenderEnv): Promise<void> {
-    for (const img of Array.from(root.querySelectorAll('img[src]'))) {
-      const src = img.getAttribute('src') ?? '';
-      if (/^data:image\//i.test(src)) continue;
-      const data = await this.loadAsset(src, fromPath, env, 'image');
-      if (data) img.setAttribute('src', data);
-      else img.removeAttribute('src');
+    for (const img of Array.from(root.querySelectorAll('img'))) {
+      const srcset = img.getAttribute('srcset') ?? '';
+      const raw = (img.getAttribute('src') || img.getAttribute('ngsrc') || srcset.split(',')[0].trim().split(/\s+/)[0] || '').trim();
+      const data = raw ? await this.loadAsset(raw, fromPath, env, 'image', 'template') : null;
+      if (data) {
+        img.setAttribute('src', data);
+      } else {
+        img.setAttribute('src', NX_IMAGE_PLACEHOLDER);
+        env.approximate = true;
+      }
+      img.removeAttribute('srcset');
+      img.removeAttribute('ngsrc');
+    }
+    for (const el of Array.from(root.querySelectorAll('[style]'))) {
+      const style = el.getAttribute('style') ?? '';
+      if (!/url\(/i.test(style)) continue;
+      el.setAttribute('style', await this.inlineCssAssets(style, fromPath, env, 'template'));
     }
   }
 
   /**
-   * Mide el documento en un iframe oculto de 1280×800 del mismo origen (sin scripts): alto real (≤ 4000) y encuadre en
-   * la raíz del plan (margen 8) si existe y es más estrecha que la pantalla; si la marca `.nx` queda fuera de la parte
-   * visible de la miniatura, se centra en vertical.
+   * Mide el documento en un iframe oculto del tamaño elegido, del mismo origen (sin scripts): alto real (≤ 4000) y
+   * encuadre en la raíz del plan (margen 8) si existe y es más estrecha que la pantalla; si la marca `.nx` queda fuera
+   * de la parte visible de la miniatura, se centra en vertical.
    */
-  private async measureFrame(html: string, rootSelector: string): Promise<UiScreenView['frame']> {
-    const fallback = { width: VIEWPORT_W, height: VIEWPORT_H, crop: { x: 0, y: 0, w: VIEWPORT_W, h: VIEWPORT_H } };
+  private async measureFrame(html: string, rootSelector: string, vp: UiViewportSpec): Promise<UiScreenView['frame']> {
+    const W = vp.width;
+    const H = vp.height;
+    const fallback = { width: W, height: H, viewportHeight: H, crop: { x: 0, y: 0, w: W, h: H } };
     if (typeof document === 'undefined' || !document.body) return fallback;
     const iframe = document.createElement('iframe');
     try {
       iframe.setAttribute('sandbox', 'allow-same-origin');
       iframe.setAttribute('aria-hidden', 'true');
       iframe.setAttribute('tabindex', '-1');
-      iframe.style.cssText = `position:fixed;left:-20000px;top:0;width:${VIEWPORT_W}px;height:${VIEWPORT_H}px;visibility:hidden;pointer-events:none;border:0`;
+      iframe.style.cssText = `position:fixed;left:-20000px;top:0;width:${W}px;height:${H}px;visibility:hidden;pointer-events:none;border:0`;
       const loaded = new Promise<boolean>((resolve) => {
         const timer = setTimeout(() => resolve(false), 2500);
         iframe.addEventListener('load', () => {
@@ -1082,7 +1275,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       if (!doc || !doc.documentElement) return fallback;
       const rootEl = doc.documentElement;
       const height = Math.max(1, Math.min(MAX_DOC_H, Math.max(rootEl.scrollHeight, doc.body?.scrollHeight ?? 0)));
-      let crop = { x: 0, y: 0, w: VIEWPORT_W, h: height };
+      let crop = { x: 0, y: 0, w: W, h: height };
       let target: Element | null = null;
       try {
         target = doc.querySelector(rootSelector);
@@ -1091,13 +1284,13 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       if (target) {
         const r = target.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0 && r.width < VIEWPORT_W) {
+        if (r.width > 0 && r.height > 0 && r.width < W) {
           const x = Math.max(0, Math.floor(r.left - CROP_MARGIN));
           const y = Math.max(0, Math.floor(r.top - CROP_MARGIN));
           crop = {
             x,
             y,
-            w: Math.min(VIEWPORT_W - x, Math.ceil(r.width + CROP_MARGIN * 2)),
+            w: Math.min(W - x, Math.ceil(r.width + CROP_MARGIN * 2)),
             h: Math.min(height - y, Math.ceil(r.height + CROP_MARGIN * 2)),
           };
         }
@@ -1113,7 +1306,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
           crop = { ...crop, y, h: Math.max(crop.h, Math.min(height - y, visible)) };
         }
       }
-      return { width: VIEWPORT_W, height, crop };
+      return { width: W, height, viewportHeight: H, crop };
     } catch (error: unknown) {
       console.warn('[Nexo IA] No se pudo medir la vista de pantalla.', error instanceof Error ? error.name : '');
       return fallback;
@@ -1186,29 +1379,79 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   }
 
   /**
+   * `angular.json` del montaje, leído una vez por carga: estilos globales (primer proyecto con `styles`) y carpetas de
+   * assets (del mismo proyecto o, si no tiene, del primero con `assets`) como prefijo de URL → carpeta.
+   */
+  private async angularConfig(env: RenderEnv): Promise<AngularBuildConfig | null> {
+    if (env.angular !== undefined) return env.angular;
+    env.angular = null;
+    const text = await this.readText(this.fileInMount(`${env.prefix}angular.json`, env), env);
+    if (!text) return null;
+    type Project = { root?: unknown; sourceRoot?: unknown; architect?: { build?: { options?: { styles?: unknown; assets?: unknown } } } };
+    try {
+      const parsed = JSON.parse(text) as { projects?: Record<string, Project> };
+      const projects = Object.values(parsed?.projects ?? {}).filter((p): p is Project => !!p && typeof p === 'object');
+      const stylesOf = (p: Project): string[] => {
+        const styles = p.architect?.build?.options?.styles;
+        const out: string[] = [];
+        if (!Array.isArray(styles)) return out;
+        for (const entry of styles) {
+          const input = typeof entry === 'string' ? entry : entry && typeof entry === 'object' ? (entry as { input?: unknown }).input : null;
+          if (typeof input === 'string' && input.trim() && !out.includes(input)) out.push(input);
+        }
+        return out;
+      };
+      let styles: string[] = [];
+      let owner: Project | null = null;
+      for (const p of projects) {
+        styles = stylesOf(p);
+        if (styles.length) {
+          owner = p;
+          break;
+        }
+      }
+      const hasAssets = (p: Project | null): p is Project => !!p && Array.isArray(p.architect?.build?.options?.assets);
+      const assetProject = hasAssets(owner) ? owner : projects.find((p) => hasAssets(p)) ?? null;
+      const assets: AssetMapping[] = [];
+      if (assetProject) {
+        const projRoot = normPath(typeof assetProject.root === 'string' ? assetProject.root : '').replace(/\/+$/, '');
+        const sourceRoot = normPath(typeof assetProject.sourceRoot === 'string' ? assetProject.sourceRoot : (projRoot ? `${projRoot}/src` : 'src')).replace(/\/+$/, '');
+        for (const entry of assetProject.architect?.build?.options?.assets as unknown[]) {
+          if (typeof entry === 'string') {
+            const e = normPath(entry.trim()).replace(/^\/+/, '').replace(/\/+$/, '');
+            if (!e) continue;
+            let url: string;
+            if (sourceRoot && e.startsWith(`${sourceRoot}/`)) url = e.slice(sourceRoot.length + 1);
+            else if (projRoot && e.startsWith(`${projRoot}/`)) url = e.slice(projRoot.length + 1);
+            else url = basename(e);
+            const exact = extOf(e) !== '';
+            assets.push(exact ? { url, dir: e, exact } : { url: `${url}/`, dir: `${e}/`, exact });
+          } else if (entry && typeof entry === 'object') {
+            const input = (entry as { input?: unknown }).input;
+            const output = (entry as { output?: unknown }).output;
+            if (typeof input !== 'string') continue;
+            const dir = normPath(input.trim()).replace(/^\/+/, '').replace(/\/+$/, '');
+            const out = normPath(typeof output === 'string' ? output : '').replace(/^\/+|\/+$/g, '');
+            assets.push({ url: out ? `${out}/` : '', dir: dir ? `${dir}/` : '', exact: false });
+          }
+        }
+        assets.sort((a, b) => b.url.length - a.url.length);
+      }
+      env.angular = { styles, assets };
+    } catch (error: unknown) {
+      console.warn('[Nexo IA] angular.json no válido.', error instanceof Error ? error.name : '');
+      env.angular = null;
+    }
+    return env.angular;
+  }
+
+  /**
    * Estilos globales compilados (sin incrustar assets): todas las entradas de `angular.json` en orden (las `.scss`
    * con el CSS de `dist/` si existe; si no, compiladas) y las hojas locales y `<style>` de `src/index.html`. Lo que
    * no se puede leer (externo, `node_modules` ausente) marca la vista aproximada.
    */
   private async globalSheets(env: RenderEnv): Promise<{ path: string; css: string }[]> {
-    const specs: string[] = [];
-    const angularJson = await this.readText(this.fileInMount(`${env.prefix}angular.json`, env), env);
-    if (angularJson) {
-      try {
-        const parsed = JSON.parse(angularJson) as { projects?: Record<string, { architect?: { build?: { options?: { styles?: unknown } } } }> };
-        for (const project of Object.values(parsed.projects ?? {})) {
-          const styles = project?.architect?.build?.options?.styles;
-          if (!Array.isArray(styles)) continue;
-          for (const entry of styles) {
-            const input = typeof entry === 'string' ? entry : entry && typeof entry === 'object' ? (entry as { input?: unknown }).input : null;
-            if (typeof input === 'string' && input.trim() && !specs.includes(input)) specs.push(input);
-          }
-          if (specs.length) break;
-        }
-      } catch (error: unknown) {
-        console.warn('[Nexo IA] angular.json no válido.', error instanceof Error ? error.name : '');
-      }
-    }
+    const specs: string[] = [...(await this.angularConfig(env))?.styles ?? []];
     if (!specs.length) {
       if (this.fileInMount(`${env.prefix}src/styles.css`, env)) specs.push('src/styles.css');
       else if (this.fileInMount(`${env.prefix}src/styles.scss`, env)) specs.push('src/styles.scss');
@@ -1293,7 +1536,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   }
 
   /** Sustituye los `url()` de imágenes y fuentes locales por data URI (relativas a la hoja); el resto lo anula `sanitizeCss`. */
-  private async inlineCssAssets(css: string, fromPath: string, env: RenderEnv): Promise<string> {
+  private async inlineCssAssets(css: string, fromPath: string, env: RenderEnv, context: 'template' | 'css' = 'css'): Promise<string> {
     const re = /url\(\s*(['"]?)([^'")]+)\1\s*\)/gi;
     const found = new Set<string>();
     let m: RegExpExecArray | null;
@@ -1305,7 +1548,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     const resolved = new Map<string, string | null>();
     for (const url of found) {
       const ext = extOf(url.split('#')[0].split('?')[0]);
-      resolved.set(url, await this.loadAsset(url, fromPath, env, FONT_EXTENSIONS.has(ext) ? 'font' : 'image'));
+      resolved.set(url, await this.loadAsset(url, fromPath, env, FONT_EXTENSIONS.has(ext) ? 'font' : 'image', context));
     }
     return css.replace(re, (match, _q: string, url: string) => {
       const data = resolved.get(url.trim());
@@ -1313,20 +1556,48 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     });
   }
 
-  /** Imagen o fuente local como data URI (`null` si no existe, no está permitida, no es del tipo o supera los límites). */
-  private async loadAsset(spec: string, fromPath: string, env: RenderEnv, kind: 'image' | 'font'): Promise<string | null> {
+  /**
+   * Imagen o fuente local como data URI (`null` si es remota, no existe, no está permitida, no es del tipo o supera los
+   * límites). Resuelve con las carpetas de assets de `angular.json`, rutas relativas, `src/`, la raíz, `public/`,
+   * `node_modules` (carpeta vinculada) y, en último lugar, sin distinguir mayúsculas. Los SVG con contenido activo se
+   * rechazan.
+   */
+  private async loadAsset(spec: string, fromPath: string, env: RenderEnv, kind: 'image' | 'font',
+    context: 'template' | 'css' = 'css'): Promise<string | null> {
     const raw = String(spec ?? '').trim();
-    if (!raw || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(raw)) return null;
-    const clean = normPath(raw.split('#')[0].split('?')[0]).replace(/^\/+/, '');
-    const candidates = [
-      resolveCodeReference(fromPath, raw),
-      `${env.prefix}src/${clean}`,
-      `${env.prefix}${clean}`,
-      `${env.prefix}public/${clean}`,
-    ];
+    if (/^data:image\//i.test(raw) || (kind === 'font' && /^data:font\//i.test(raw))) return raw;
+    if (!raw || /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(raw) || raw.includes('{{')) return null;
+    let clean = raw.split('#')[0].split('?')[0];
+    try {
+      clean = decodeURIComponent(clean);
+    } catch (error: unknown) {
+      console.warn('[Nexo IA] Ruta de asset mal codificada.', error instanceof Error ? error.name : '');
+    }
+    clean = normPath(clean).replace(/^\/+/, '');
+    if (!clean) return null;
+    const prefix = env.prefix;
+    const relative = context === 'css' || /^\.\.?\//.test(raw);
+    const list: (string | null)[] = [];
+    if (relative) list.push(resolveCodeReference(fromPath, raw));
+    for (const m of (await this.angularConfig(env))?.assets ?? []) {
+      if (m.exact) {
+        if (clean === m.url) list.push(`${prefix}${m.dir}`);
+      } else if (m.url === '' || clean.startsWith(m.url)) {
+        list.push(`${prefix}${m.dir}${clean.slice(m.url.length)}`);
+      }
+    }
+    if (!relative) list.push(resolveCodeReference(fromPath, raw));
+    list.push(`${prefix}src/${clean}`, `${prefix}${clean}`, `${prefix}public/${clean}`);
+    const candidates = [...new Set(list.filter((c): c is string => !!c))];
+    let pkg: string | null = null;
     for (const candidate of candidates) {
-      const file = this.fileInMount(candidate, env);
-      if (!file || !env.isAllowed(file) || isSensitiveCodeFile(file.name)) continue;
+      const file = this.fileInMount(candidate, env) ?? this.fileByPathCi(candidate, env);
+      if (!file) {
+        const safe = safeRelativePath(candidate);
+        if (!pkg && safe && prefix && safe.startsWith(`${prefix}node_modules/`)) pkg = safe;
+        continue;
+      }
+      if (!this.assetAllowed(file)) continue;
       if (env.assets.has(file.path)) return env.assets.get(file.path) ?? null;
       const ext = file.extension || extOf(file.name);
       const mime = codeMimeFor(file.name);
@@ -1334,7 +1605,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         ? FONT_EXTENSIONS.has(ext) && mime.startsWith('font/')
         : IMAGE_EXTENSIONS.has(ext) && mime.startsWith('image/');
       if (!ok) continue;
-      const max = kind === 'font' ? MAX_FONT_BYTES : MAX_IMAGE_BYTES;
+      const svg = ext === 'svg';
+      const max = kind === 'font' ? MAX_FONT_BYTES : svg ? MAX_SVG_BYTES : MAX_IMAGE_BYTES;
       let base64: string | null = null;
       if (isCodeFileReady(file) && file.content) {
         base64 = file.binary ? file.content : encodeUtf8Base64(file.content);
@@ -1343,37 +1615,74 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       if (!base64) continue;
       const bytes = Math.floor((base64.length * 3) / 4);
-      if (bytes > max || env.assetsTotal + bytes > MAX_ASSETS_TOTAL) {
+      if (bytes > max || env.assetsTotal + bytes > MAX_ASSETS_TOTAL || (svg && !this.svgSafe(base64))) {
         env.approximate = true;
         env.assets.set(file.path, null);
         return null;
       }
       env.assetsTotal += bytes;
-      const data = `data:${mime};base64,${base64}`;
+      const data = `data:${svg ? 'image/svg+xml' : mime};base64,${base64}`;
       env.assets.set(file.path, data);
       return data;
     }
     // Fuentes e imágenes de paquetes (p. ej. bootstrap-icons): no están en el índice, se leen de la carpeta vinculada.
-    const pkg = safeRelativePath(resolveCodeReference(fromPath, raw) ?? '');
-    const rel = pkg && env.prefix && pkg.startsWith(env.prefix) ? pkg.slice(env.prefix.length) : null;
-    if (!rel || !/^node_modules\//.test(rel)) return null;
-    if (env.assets.has(pkg!)) return env.assets.get(pkg!) ?? null;
+    if (!pkg) return null;
+    const rel = pkg.slice(prefix.length);
+    if (env.assets.has(pkg)) return env.assets.get(pkg) ?? null;
     const name = rel.split('/').pop() ?? '';
     const ext = extOf(name);
     const mime = codeMimeFor(name);
     const ok = kind === 'font' ? FONT_EXTENSIONS.has(ext) && mime.startsWith('font/') : IMAGE_EXTENSIONS.has(ext) && mime.startsWith('image/');
-    if (!ok) return null;
-    const max = kind === 'font' ? MAX_FONT_BYTES : MAX_IMAGE_BYTES;
+    if (!ok || isSensitiveCodeFile(name)) return null;
+    const svg = ext === 'svg';
+    const max = kind === 'font' ? MAX_FONT_BYTES : svg ? MAX_SVG_BYTES : MAX_IMAGE_BYTES;
     const base64 = await this.readPackageFile(rel, env, max, 'base64');
     const bytes = base64 ? Math.floor((base64.length * 3) / 4) : 0;
-    if (!base64 || env.assetsTotal + bytes > MAX_ASSETS_TOTAL) {
+    if (!base64 || bytes > max || env.assetsTotal + bytes > MAX_ASSETS_TOTAL || (svg && !this.svgSafe(base64))) {
       env.approximate = true;
-      env.assets.set(pkg!, null);
+      env.assets.set(pkg, null);
       return null;
     }
     env.assetsTotal += bytes;
-    const data = `data:${mime};base64,${base64}`;
-    env.assets.set(pkg!, data);
+    const data = `data:${svg ? 'image/svg+xml' : mime};base64,${base64}`;
+    env.assets.set(pkg, data);
     return data;
+  }
+
+  /** SVG sin scripts, `foreignObject`, manejadores, `javascript:` ni entidades (solo se usa como imagen). */
+  private svgSafe(base64: string): boolean {
+    try {
+      const bin = atob(base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return !SVG_UNSAFE.test(new TextDecoder().decode(bytes));
+    } catch (error: unknown) {
+      console.warn('[Nexo IA] SVG no legible.', error instanceof Error ? error.name : '');
+      return false;
+    }
+  }
+
+  /** Filtro propio del render (los assets no entran en el contexto de la IA): ni sensibles ni en carpetas excluidas. */
+  private assetAllowed(file: WorkspaceCodeFile): boolean {
+    return !isSensitiveCodeFile(file.name) && !isContextExcludedDir(file.path);
+  }
+
+  /** Último recurso: misma ruta sin distinguir mayúsculas (dentro del montaje). */
+  private fileByPathCi(path: string, env: RenderEnv): WorkspaceCodeFile | null {
+    const rel = safeRelativePath(path);
+    const norm = rel ? normalizeCodePath(rel) : '';
+    if (!norm) return null;
+    const files = this.project.project.files;
+    if (!this.ciIndex || this.ciIndex.files !== files) {
+      const map = new Map<string, WorkspaceCodeFile>();
+      for (const f of files) {
+        const key = f.path.toLowerCase();
+        if (!map.has(key)) map.set(key, f);
+      }
+      this.ciIndex = { files, map };
+    }
+    const file = this.ciIndex.map.get(norm.toLowerCase()) ?? null;
+    if (!file || (env.prefix && !file.path.startsWith(env.prefix))) return null;
+    return file;
   }
 }

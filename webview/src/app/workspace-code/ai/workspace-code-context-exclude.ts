@@ -16,6 +16,15 @@ const EXCLUDED_EXTENSIONS = new Set([
   'exe', 'dll', 'so', 'dylib', 'bin', 'class', 'o', 'obj', 'a', 'lib', 'pyc', 'pyo', 'wasm', 'db', 'sqlite', 'sqlite3', 'dat',
 ]);
 
+/** Ruta con algún segmento de directorio excluido (dependencias, salidas de build…); no mira extensión ni lockfiles. */
+export function isContextExcludedDir(path: string): boolean {
+  const segments = String(path ?? '').split('/');
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (EXCLUDED_DIRS.has(segments[i].toLowerCase())) return true;
+  }
+  return false;
+}
+
 /** Rutas que nunca forman parte del contexto de la IA (dependencias, salidas de build, lockfiles, binarios…). */
 export function isContextExcludedPath(path: string): boolean {
   const segments = String(path ?? '').split('/');

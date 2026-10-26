@@ -26,6 +26,17 @@ export abstract class NexoBridge {
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   }
 
+  /** Estado de la UI que sobrevive a recargas de la webview (en memoria en el modo navegador). */
+  protected readonly uiState = new Map<string, unknown>();
+
+  getUiState(key: string): unknown {
+    return this.uiState.get(key);
+  }
+
+  setUiState(key: string, value: unknown): void {
+    this.uiState.set(key, value);
+  }
+
   abstract request<T>(req: BridgeRequest, id?: string): Promise<T>;
   abstract cancel(id: string): void;
   abstract post(msg: WebviewToHost): void;

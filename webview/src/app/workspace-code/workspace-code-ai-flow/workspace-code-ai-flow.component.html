@@ -100,6 +100,10 @@
             <i class="bi bi-display" aria-hidden="true"></i>
             <span class="wcf-uip__title">{{ 'aiFlow.preview.title' | wcT }}</span>
             <span class="wcf-uip__chip">P{{ preview.screenStep + 1 }}</span>
+            <div class="wcf-uip__tabs wcf-uip__vp" role="group" [attr.aria-label]="'aiFlow.screen.viewport' | wcT" *ngIf="preview.status === 'ready'">
+              <button type="button" *ngFor="let vp of preview.viewports" [class.is-on]="preview.viewport === vp.id" [attr.aria-pressed]="preview.viewport === vp.id"
+                [disabled]="preview.viewportBusy" [title]="vp.key | wcT" [attr.aria-label]="vp.key | wcT" (click)="setViewport(vp.id)"><i class="bi" [ngClass]="vp.icon" aria-hidden="true"></i></button>
+            </div>
             <button type="button" class="wcf-uip__close" *ngIf="preview.status === 'ready'" [title]="'aiFlow.screen.zoom' | wcT"
               [attr.aria-label]="'aiFlow.screen.zoom' | wcT" (click)="preview.openZoom()"><i class="bi bi-arrows-angle-expand" aria-hidden="true"></i></button>
             <button type="button" class="wcf-uip__close" [title]="'aiFlow.preview.close' | wcT" [attr.aria-label]="'aiFlow.preview.close' | wcT"
@@ -123,10 +127,11 @@
             <small *ngIf="preview.errorText && preview.errorText !== ('aiFlow.screen.failed' | wcT)">{{ preview.errorText }}</small>
             <button type="button" class="wcf-btn" (click)="preview.retry()"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>{{ 'aiFlow.screen.retry' | wcT }}</button>
           </div>
-          <div class="wcf-uip__thumb" #uiThumb [hidden]="preview.status !== 'ready'">
+          <div class="wcf-uip__thumb" #uiThumb [hidden]="preview.status !== 'ready'" [class.is-busy]="preview.viewportBusy">
             <iframe #uiFrame class="wcf-uip__frame" sandbox="" referrerpolicy="no-referrer" tabindex="-1"
               [title]="'aiFlow.preview.frame' | wcT"></iframe>
           </div>
+          <span class="wcf-uip__sr" role="status" *ngIf="preview.viewportBusy">{{ 'aiFlow.screen.vpBusy' | wcT }}</span>
           <footer class="wcf-uip__foot" *ngIf="preview.status === 'ready' && previewView as v">
             <p class="wcf-uip__caption" [title]="v.caption">{{ v.caption }}</p>
             <p class="wcf-uip__approx" *ngIf="v.approximate">
@@ -356,7 +361,7 @@
     </div>
   </footer>
 
-  <!-- Vista de pantalla ampliada (tamaño real, sin escalar) -->
+  <!-- Vista de pantalla ampliada: ventana del tamaño elegido ajustada al espacio (o al 100 %); el resto del documento con scroll -->
   <section class="wcf-uip-zoom" *ngIf="preview.zoom && previewView?.srcdoc" role="dialog" [attr.aria-label]="'aiFlow.screen.zoom' | wcT">
     <header class="wcf-uip-zoom__head">
       <i class="bi bi-display" aria-hidden="true"></i>
@@ -367,12 +372,26 @@
         <button type="button" role="tab" [class.is-on]="preview.tab === 'after'" [attr.aria-selected]="preview.tab === 'after'"
           (click)="preview.setTab('after')">{{ 'aiFlow.preview.tab.after' | wcT }}</button>
       </div>
+      <div class="wcf-uip__tabs wcf-uip-zoom__fit" role="group" [attr.aria-label]="'aiFlow.screen.scale' | wcT">
+        <button type="button" [class.is-on]="zoomFit === 'fit'" [attr.aria-pressed]="zoomFit === 'fit'" (click)="setZoomFit('fit')"
+          [title]="'aiFlow.screen.fitTitle' | wcT">{{ 'aiFlow.screen.fit' | wcT }}</button>
+        <button type="button" [class.is-on]="zoomFit === 'actual'" [attr.aria-pressed]="zoomFit === 'actual'" (click)="setZoomFit('actual')"
+          [title]="'aiFlow.screen.actualTitle' | wcT">100 %</button>
+      </div>
+      <div class="wcf-uip__tabs wcf-uip__vp wcf-uip-zoom__vp" role="group" [attr.aria-label]="'aiFlow.screen.viewport' | wcT">
+        <button type="button" *ngFor="let vp of preview.viewports" [class.is-on]="preview.viewport === vp.id" [attr.aria-pressed]="preview.viewport === vp.id"
+          [disabled]="preview.viewportBusy || preview.status === 'loading'" [title]="vp.key | wcT" [attr.aria-label]="vp.key | wcT" (click)="setViewport(vp.id)"><i class="bi" [ngClass]="vp.icon" aria-hidden="true"></i></button>
+      </div>
+      <span class="wcf-uip-zoom__meta" #uiZoomMeta></span>
       <span class="wcf-uip-zoom__spacer"></span>
       <button type="button" class="wcf-uip__close" [title]="'aiFlow.screen.zoomClose' | wcT" [attr.aria-label]="'aiFlow.screen.zoomClose' | wcT"
         (click)="preview.closeZoom()"><i class="bi bi-x-lg" aria-hidden="true"></i></button>
     </header>
-    <div class="wcf-uip-zoom__body">
-      <iframe #uiZoomFrame class="wcf-uip-zoom__frame" sandbox="" referrerpolicy="no-referrer" tabindex="-1" [title]="'aiFlow.preview.frame' | wcT"></iframe>
+    <div class="wcf-uip-zoom__body" #uiZoomBody>
+      <div class="wcf-uip-zoom__stage" #uiZoomStage [class.is-busy]="preview.viewportBusy">
+        <iframe #uiZoomFrame class="wcf-uip-zoom__frame" sandbox="" referrerpolicy="no-referrer" tabindex="-1" [title]="'aiFlow.preview.frame' | wcT"></iframe>
+        <div class="wcf-uip-zoom__fold" #uiZoomFold hidden><span class="wcf-uip-zoom__fold-label">{{ 'aiFlow.screen.fold' | wcT }}</span></div>
+      </div>
     </div>
   </section>
 </div>

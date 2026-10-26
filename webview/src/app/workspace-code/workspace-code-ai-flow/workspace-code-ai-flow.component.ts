@@ -15,7 +15,7 @@ import {
   SimulationResult,
 } from '../ai/nexo-ia.types';
 import { FlowStatusPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
-import { UiScreenView, WorkspaceCodeAiUiPreviewService } from '../services/workspace-code-ai-ui-preview.service';
+import { UiScreenView, UiViewportId, WorkspaceCodeAiUiPreviewService } from '../services/workspace-code-ai-ui-preview.service';
 import { WorkspaceCodeNotifyService } from '../services/workspace-code-notify.service';
 import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
 import { NexoBridge } from '../../bridge/nexo-bridge';
@@ -32,6 +32,9 @@ const PREVIEW_GAP = 6;
 const THUMB_INSET = 22;
 const THUMB_MIN_H = 140;
 const THUMB_MAX_H = 280;
+/** Vista ampliada: escala mínima en «Ajustar» y máxima (nunca se amplía por encima del 100 %). */
+const ZOOM_MIN_SCALE = 0.1;
+const ZOOM_MAX_SCALE = 1;
 /** Menú de acciones del paso: espera antes de cerrarse al salir del número o del panel. */
 const STEP_MENU_CLOSE_MS = 160;
 
@@ -72,6 +75,14 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   @ViewChild('uiFrame') uiFrame?: ElementRef<HTMLIFrameElement>;
   @ViewChild('uiThumb') uiThumb?: ElementRef<HTMLDivElement>;
   @ViewChild('uiZoomFrame') uiZoomFrame?: ElementRef<HTMLIFrameElement>;
+  @ViewChild('uiZoomBody') uiZoomBody?: ElementRef<HTMLDivElement>;
+  @ViewChild('uiZoomStage') uiZoomStage?: ElementRef<HTMLDivElement>;
+  @ViewChild('uiZoomFold') uiZoomFold?: ElementRef<HTMLDivElement>;
+  @ViewChild('uiZoomMeta') uiZoomMeta?: ElementRef<HTMLSpanElement>;
+
+  /** Modo de escala de la vista ampliada: ajustada al espacio disponible o tamaño real. */
+  zoomFit: 'fit' | 'actual' = 'fit';
+  private zoomWasOpen = false;
 
   narrow = false;
   /** Paso con el menú de acciones abierto (`null` = ninguno). */
@@ -450,7 +461,7 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
 
   /**
    * Asigna el `srcdoc` por `ElementRef` (sin pasar por el saneador de Angular; el iframe va con `sandbox=""`) y la
-   * geometría de la miniatura: iframe a 1280 de ancho escalado al popup y desplazado al encuadre (`frame.crop`).
+   * geometría de la miniatura: iframe al ancho del tamaño elegido escalado al popup y desplazado al encuadre (`frame.crop`).
    */
   private applyFrame(): void {
     const view = this.preview.status === 'ready' ? this.previewView : null;
@@ -471,19 +482,64 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
         frame.style.height = `${view.frame.height}px`;
         frame.style.transform = `scale(${s})`;
         frame.style.transformOrigin = '0 0';
-        frame.style.left = `${Math.round(-crop.x * s)}px`;
+        // Encuadres más estrechos que la miniatura (p. ej. móvil): centrados en horizontal.
+        frame.style.left = crop.w * s < tw ? `${Math.round((tw - crop.w * s) / 2 - crop.x * s)}px` : `${Math.round(-crop.x * s)}px`;
         frame.style.top = `${Math.round(-crop.y * s)}px`;
       }
     }
     const zoomFrame = this.uiZoomFrame?.nativeElement;
-    if (zoomFrame) {
-      const srcdoc = this.preview.zoom && view ? view.srcdoc : '';
-      if (zoomFrame.srcdoc !== srcdoc) zoomFrame.srcdoc = srcdoc;
-      if (view) {
-        zoomFrame.style.width = `${view.frame.width}px`;
-        zoomFrame.style.height = `${view.frame.height}px`;
+    if (!zoomFrame) {
+      this.zoomWasOpen = false;
+      return;
+    }
+    if (!this.zoomWasOpen) {
+      this.zoomWasOpen = true;
+      if (this.zoomFit !== 'fit') {
+        this.zone.run(() => {
+          this.zoomFit = 'fit';
+          this.cdr.markForCheck();
+        });
       }
     }
+    const srcdoc = this.preview.zoom && view ? view.srcdoc : '';
+    if (zoomFrame.srcdoc !== srcdoc) zoomFrame.srcdoc = srcdoc;
+    const body = this.uiZoomBody?.nativeElement;
+    const stage = this.uiZoomStage?.nativeElement;
+    if (!view || !body || !stage) return;
+    const w = view.frame.width;
+    const vh = view.frame.viewportHeight;
+    const fh = Math.max(view.frame.height, vh);
+    const cs = getComputedStyle(body);
+    const availW = body.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+    const availH = body.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+    let s = ZOOM_MAX_SCALE;
+    if (this.zoomFit === 'fit' && availW > 0 && availH > 0 && w > 0 && vh > 0) {
+      s = Math.min(ZOOM_MAX_SCALE, Math.max(ZOOM_MIN_SCALE, Math.min(availW / w, availH / vh)));
+    }
+    zoomFrame.style.width = `${w}px`;
+    zoomFrame.style.height = `${fh}px`;
+    zoomFrame.style.transform = `scale(${s})`;
+    zoomFrame.style.transformOrigin = '0 0';
+    stage.style.width = `${Math.round(w * s)}px`;
+    stage.style.height = `${Math.round(fh * s)}px`;
+    const fold = this.uiZoomFold?.nativeElement;
+    if (fold) {
+      fold.hidden = fh <= vh;
+      fold.style.top = `${Math.round(vh * s)}px`;
+    }
+    const meta = this.uiZoomMeta?.nativeElement;
+    if (meta) meta.textContent = `${w} × ${vh} · ${Math.round(s * 100)} %`;
+  }
+
+  setViewport(id: UiViewportId): void {
+    void this.preview.setViewport(id);
+  }
+
+  setZoomFit(mode: 'fit' | 'actual'): void {
+    if (this.zoomFit === mode) return;
+    this.zoomFit = mode;
+    this.cdr.markForCheck();
+    this.schedulePreviewLayout();
   }
 
   private schedulePreviewLayout(scroll: PreviewScroll = 'none'): void {
