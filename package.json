@@ -1,8 +1,8 @@
 {
-  "name": "nexo-vscode",
-  "displayName": "Nexo Flujo",
+  "name": "traza",
+  "displayName": "Traza",
   "description": "Visualización del flujo de un proceso del proyecto (diagrama de secuencia, simular datos, analizar logs y proponer cambios) con el modelo de lenguaje que ya usas en VS Code. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.",
-  "publisher": "nexo-local",
+  "publisher": "ftejero21",
   "version": "0.1.0",
   "private": true,
   "license": "UNLICENSED",
@@ -19,97 +19,97 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onChatParticipant:nexo.flow",
-    "onLanguageModelTool:nexo_flow",
+    "onChatParticipant:traza.flow",
+    "onLanguageModelTool:traza_flow",
     "onUri"
   ],
   "contributes": {
     "commands": [
       {
-        "command": "nexo.openFlow",
-        "title": "Nexo: Flujo",
+        "command": "traza.openFlow",
+        "title": "Traza: Flujo",
         "icon": "$(type-hierarchy-sub)"
       },
       {
-        "command": "nexo.openSampleFlow",
-        "title": "Nexo: Abrir flujo de ejemplo"
+        "command": "traza.openSampleFlow",
+        "title": "Traza: Abrir flujo de ejemplo"
       },
       {
-        "command": "nexo.generateFlow",
-        "title": "Nexo: Generar flujo",
+        "command": "traza.generateFlow",
+        "title": "Traza: Generar flujo",
         "icon": "$(type-hierarchy-sub)"
       },
       {
-        "command": "nexo.proposeChange",
-        "title": "Nexo: Proponer cambio"
+        "command": "traza.proposeChange",
+        "title": "Traza: Proponer cambio"
       },
       {
-        "command": "nexo.selectModel",
-        "title": "Nexo: Elegir modelo"
+        "command": "traza.selectModel",
+        "title": "Traza: Elegir modelo"
       },
       {
-        "command": "nexo.showLastFlow",
-        "title": "Nexo: Mostrar último flujo generado"
+        "command": "traza.showLastFlow",
+        "title": "Traza: Mostrar último flujo generado"
       },
       {
-        "command": "nexo.showFlow",
-        "title": "Nexo: Visualizar flujo"
+        "command": "traza.showFlow",
+        "title": "Traza: Visualizar flujo"
       },
       {
-        "command": "nexo.addDatabase",
-        "title": "Nexo: Añadir conexión de base de datos"
+        "command": "traza.addDatabase",
+        "title": "Traza: Añadir conexión de base de datos"
       },
       {
-        "command": "nexo.setDatabasePassword",
-        "title": "Nexo: Contraseña de base de datos"
+        "command": "traza.setDatabasePassword",
+        "title": "Traza: Contraseña de base de datos"
       },
       {
-        "command": "nexo.testDatabase",
-        "title": "Nexo: Probar conexión de base de datos"
+        "command": "traza.testDatabase",
+        "title": "Traza: Probar conexión de base de datos"
       },
       {
-        "command": "nexo.removeDatabase",
-        "title": "Nexo: Quitar conexión de base de datos"
+        "command": "traza.removeDatabase",
+        "title": "Traza: Quitar conexión de base de datos"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "nexo.openFlow",
+          "command": "traza.openFlow",
           "when": "resourceFilename =~ /\\.flow\\.json$/",
           "group": "navigation"
         }
       ],
       "editor/context": [
         {
-          "command": "nexo.generateFlow",
+          "command": "traza.generateFlow",
           "when": "editorTextFocus",
-          "group": "nexo"
+          "group": "traza"
         }
       ],
       "commandPalette": [
         {
-          "command": "nexo.showFlow",
+          "command": "traza.showFlow",
           "when": "false"
         }
       ]
     },
     "chatInstructions": [
       {
-        "path": "./instructions/nexo.instructions.md",
-        "name": "Nexo Flujo",
-        "when": "config.nexo.copilotInstructions"
+        "path": "./instructions/traza.instructions.md",
+        "name": "Traza",
+        "when": "config.traza.copilotInstructions"
       }
     ],
     "configuration": {
-      "title": "Nexo",
+      "title": "Traza",
       "properties": {
-        "nexo.copilotInstructions": {
+        "traza.copilotInstructions": {
           "type": "boolean",
           "default": true,
-          "description": "Añade a Copilot Chat instrucciones para usar Nexo en preguntas sobre flujos y terminar con el enlace “Visualizar flujo”"
+          "description": "Añade a Copilot Chat instrucciones para usar Traza en preguntas sobre flujos y terminar con el enlace “Visualizar flujo”"
         },
-        "nexo.model": {
+        "traza.model": {
           "type": "object",
           "default": {},
           "additionalProperties": false,
@@ -124,9 +124,9 @@
               "type": "string"
             }
           },
-          "markdownDescription": "Modelo de VS Code (Copilot, Claude, GPT, BYOK…) que usa Nexo; vacío = elegir al usarlo. Usa **Nexo: Elegir modelo**. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo."
+          "markdownDescription": "Modelo de VS Code (Copilot, Claude, GPT, BYOK…) que usa Traza; vacío = elegir al usarlo. Usa **Traza: Elegir modelo**. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo."
         },
-        "nexo.language": {
+        "traza.language": {
           "type": "string",
           "enum": [
             "es",
@@ -135,23 +135,23 @@
           "default": "es",
           "description": "Idioma de la vista de flujo y de las respuestas de la IA."
         },
-        "nexo.theme": {
+        "traza.theme": {
           "type": "string",
           "enum": [
-            "nexo",
+            "traza",
             "vscode"
           ],
-          "default": "nexo",
+          "default": "traza",
           "enumDescriptions": [
-            "Paleta original de Nexo, oscura o clara según el tema de VS Code",
+            "Paleta original de Traza, oscura o clara según el tema de VS Code",
             "Sigue los colores y fuentes del tema de VS Code"
           ],
           "description": "Apariencia de la vista de flujo."
         },
-        "nexo.databases": {
+        "traza.databases": {
           "type": "array",
           "default": [],
-          "description": "Conexiones de base de datos para el modo «Base de datos» de la vista de flujo (solo se lee la metadata, en solo lectura). La contraseña NO va aquí: se guarda en el almacén seguro de VS Code con \"Nexo: Contraseña de base de datos\".",
+          "description": "Conexiones de base de datos para el modo «Base de datos» de la vista de flujo (solo se lee la metadata, en solo lectura). La contraseña NO va aquí: se guarda en el almacén seguro de VS Code con \"Traza: Contraseña de base de datos\".",
           "items": {
             "type": "object",
             "required": [
@@ -223,15 +223,15 @@
     },
     "languageModelTools": [
       {
-        "name": "nexo_flow",
-        "toolReferenceName": "nexoFlujo",
+        "name": "traza_flow",
+        "toolReferenceName": "trazaFlujo",
         "canBeReferencedInPrompt": true,
-        "displayName": "Nexo: Flujo de un proceso",
+        "displayName": "Traza: Flujo de un proceso",
         "userDescription": "Genera y abre el diagrama de flujo de un proceso, endpoint o escenario «¿qué pasa si…?» (contraseña incorrecta, sin sesión…) del proyecto o carpeta indicada, con un resumen del escenario.",
         "modelDescription": "Use this tool when the user asks how a process, feature, flow or endpoint of the currently open project works (e.g. login, sign-up, payment, 'what does POST /api/x do') AND for scenario questions like 'what happens if / qué pasa si / qué ocurre si…' (errors, invalid data, missing permission, wrong password, no session, non-existent record, null field), including questions that name one of the currently open workspace folders (pass that exact folder name in 'project'; omit it otherwise and the tool searches all open folders). It reads the relevant local source code, generates a validated sequence diagram (steps source -> target with file:line references), opens it in a VS Code panel, and returns the summary, the scenario result (what the user sees, the step where it fails or stops, the conclusion), the steps as text and a markdown link that you MUST end your answer with, unchanged. The panel is already open. It does not modify any file. 'files' is an optional hint with workspace paths to look at first. Prefer this tool over answering from your own code reading for such questions; pass scenario=true for what-happens-if questions.",
         "icon": "$(type-hierarchy-sub)",
         "tags": [
-          "nexo",
+          "traza",
           "flow",
           "architecture",
           "scenario",
@@ -273,9 +273,9 @@
     ],
     "chatParticipants": [
       {
-        "id": "nexo.flow",
-        "name": "nexo",
-        "fullName": "Nexo Flujo",
+        "id": "traza.flow",
+        "name": "traza",
+        "fullName": "Traza",
         "description": "Genera el flujo de un proceso del proyecto",
         "isSticky": false,
         "commands": [

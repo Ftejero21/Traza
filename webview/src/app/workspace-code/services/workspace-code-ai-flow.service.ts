@@ -369,7 +369,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       this.emit();
     } catch (error: unknown) {
       // El flujo se muestra sin fragmentos.
-      console.warn('[Nexo IA] No se pudo revalidar el flujo.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo revalidar el flujo.', error instanceof Error ? error.name : '');
     }
   }
 
@@ -643,7 +643,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       contextBase64 = this.encode({ flowId: flow.id, flow: this.flowForBackend(flow), code, ...extra, ...(logLines !== undefined ? { logLines } : {}) });
     } catch (error: unknown) {
       if (runId !== this.runId) return;
-      console.warn('[Nexo IA] No se pudo preparar el contexto.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo preparar el contexto.', error instanceof Error ? error.name : '');
       this.fail(this.i18n.t('ai.error.generic'));
       return;
     }
@@ -702,7 +702,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       snippet = checked.snippet;
     } catch (error: unknown) {
       // Sin fragmento.
-      console.warn('[Nexo IA] No se pudo validar el diagnóstico.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo validar el diagnóstico.', error instanceof Error ? error.name : '');
     }
     if (runId !== this.runId || this.flow?.id !== flow.id) return false;
     this.resultSnippet = snippet;
@@ -1019,7 +1019,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       if (runId !== this.compareRunId) return { status: 'cancelled' };
       if (error instanceof WindowTooLargeError) return fail(this.i18n.t('aiChange.tooLarge'));
       if (error instanceof ChangeContextError) return fail(error.message);
-      console.warn('[Nexo IA] No se pudo preparar la comparación.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo preparar la comparación.', error instanceof Error ? error.name : '');
       return fail(this.i18n.t('aiChange.compareFailed'));
     }
     if (runId !== this.compareRunId) return { status: 'cancelled' };
@@ -1262,7 +1262,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       try {
         input = maskSensitiveJson(JSON.parse(ui.simInput.replace(/^﻿/, '')));
       } catch (error: unknown) {
-        console.warn('[Nexo IA] Datos de entrada no válidos para la vista de pantalla.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] Datos de entrada no válidos para la vista de pantalla.', error instanceof Error ? error.name : '');
         input = null;
       }
     } else {
@@ -1359,7 +1359,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       try {
         conn = await this.dbConnectionFor(flow, await this.validator(), false);
       } catch (error: unknown) {
-        console.warn('[Nexo IA] No se pudo resolver la conexión del mapa de datos.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo resolver la conexión del mapa de datos.', error instanceof Error ? error.name : '');
       }
       if (runId !== this.dbRunId || this.flow?.id !== flow.id) return;
       this.presentDbMap(known, conn);
@@ -1375,7 +1375,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       prepared = await this.dbMapContext(flow, force);
     } catch (error: unknown) {
       if (runId !== this.dbRunId) return;
-      console.warn('[Nexo IA] No se pudo preparar el contexto del mapa de datos.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo preparar el contexto del mapa de datos.', error instanceof Error ? error.name : '');
       this.dbFail(this.i18n.t('aiFlow.db.failed'));
       return;
     }
@@ -1476,7 +1476,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       const list = await this.bridge.request<DbConnectionInfo[]>({ op: 'dbConnections' });
       connections = Array.isArray(list) ? list : [];
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudieron listar las conexiones de base de datos.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron listar las conexiones de base de datos.', error instanceof Error ? error.name : '');
       return null;
     }
     const list = connections
@@ -1496,7 +1496,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       this.dbMetaCache.set(chosen.key, meta);
       return { key: chosen.key, meta };
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo leer el esquema de la base de datos.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo leer el esquema de la base de datos.', error instanceof Error ? error.name : '');
       if (warn) {
         const message = (error instanceof Error && error.message) || this.i18n.t('ai.error.generic');
         this.notify.show(this.i18n.t('aiFlow.db.schemaFailed', { message }), 'warning');
@@ -1678,7 +1678,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     try {
       return JSON.stringify(value ?? {}, null, 2) ?? '{}';
     } catch (error: unknown) {
-      console.warn('[Nexo IA] Datos de ejemplo no serializables.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] Datos de ejemplo no serializables.', error instanceof Error ? error.name : '');
       return '{}';
     }
   }

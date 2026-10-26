@@ -270,7 +270,7 @@ export function dropInvalidScenario(root: Obj): void {
   }
   if (errors.length) {
     delete root['scenario'];
-    console.warn('[Nexo] Escenario del flujo descartado.', errors.length);
+    console.warn('[Traza] Escenario del flujo descartado.', errors.length);
   }
 }
 

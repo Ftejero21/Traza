@@ -61,7 +61,7 @@ function decodeContext(contextBase64: string): Obj {
   try {
     return obj(JSON.parse(decodeUtf8Base64(contextBase64))) ?? {};
   } catch (error: unknown) {
-    console.warn('[Nexo] Contexto de ejemplo no válido.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] Contexto de ejemplo no válido.', error instanceof Error ? error.name : '');
     return {};
   }
 }

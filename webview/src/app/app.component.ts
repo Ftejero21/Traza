@@ -43,7 +43,7 @@ export class AppComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.sub.add(this.bridge.messages$.subscribe((msg) => {
       this.queue = this.queue.then(() => this.handle(msg)).catch((error: unknown) => {
-        console.warn('[Nexo] No se pudo procesar el mensaje del host.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo procesar el mensaje del host.', error instanceof Error ? error.name : '');
       });
     }));
     this.sub.add(this.bridge.toast$.subscribe((toast) => this.showToast(toast)));

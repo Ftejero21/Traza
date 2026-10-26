@@ -1,5 +1,5 @@
 /**
- * Resumen de un flujo generado, compartido por la herramienta del modo agente (`nexo_flow`) y por `@nexo`:
+ * Resumen de un flujo generado, compartido por la herramienta del modo agente (`traza_flow`) y por `@traza`:
  * detección de escenario («¿qué pasa si…?»), elección de carpeta del workspace y formateo del texto (plano para el
  * modelo, markdown escapado para el chat). Todo texto que viene de la IA se recorta y, en el chat, se escapa.
  */
@@ -15,7 +15,7 @@ const MAX_LABEL = 120;
 const MAX_FILE = 260;
 
 export function isSpanish(): boolean {
-  return vscode.workspace.getConfiguration('nexo').get<string>('language') !== 'en';
+  return vscode.workspace.getConfiguration('traza').get<string>('language') !== 'en';
 }
 
 /** Texto en una línea (saltos colapsados) y recortado a `max`. */
@@ -238,7 +238,7 @@ export function formatFlowToolText(generated: GeneratedFlow, showUri: string): s
 
 const MAX_CHAT_STEPS = 8;
 
-/** Markdown del chat de `@nexo`: título, resumen, escenario y pasos; todo texto de la IA escapado. */
+/** Markdown del chat de `@traza`: título, resumen, escenario y pasos; todo texto de la IA escapado. */
 export function formatFlowChatMarkdown(generated: GeneratedFlow): string {
   const es = isSpanish();
   const flow = generated.flow;

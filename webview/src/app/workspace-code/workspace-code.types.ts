@@ -20,7 +20,7 @@ export interface WorkspaceCodeFile {
   content: string;
   binary: boolean;
   lastModified: number;
-  /** Solo está en la carpeta local vinculada: Nexo guarda su ruta, no su contenido. */
+  /** Solo está en la carpeta local vinculada: Traza guarda su ruta, no su contenido. */
   local?: boolean;
   /** Archivo local cuyo contenido ya se ha leído del disco. */
   loaded?: boolean;
@@ -167,7 +167,7 @@ export function codeLanguageFor(name: string): WorkspaceCodeLanguage {
   return LANGUAGE_BY_NAME[name.toLowerCase()] ?? LANGUAGE_BY_EXTENSION[codeExtension(name)] ?? 'plaintext';
 }
 
-/** Claves y secretos: nunca se copian a Nexo al abrir una carpeta, se quedan en el disco. */
+/** Claves y secretos: nunca se copian a Traza al abrir una carpeta, se quedan en el disco. */
 export function isSensitiveCodeFile(name: string): boolean {
   const lower = name.toLowerCase();
   if (/^\.env\.(example|sample|template|dist)$/.test(lower)) return false;

@@ -72,7 +72,7 @@ export class NexoProjectService {
     try {
       snapshot = await this.bridge.request<ProjectSnapshot>({ op: 'listFiles' });
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo listar los archivos del workspace.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo listar los archivos del workspace.', error instanceof Error ? error.name : '');
     }
     const files: WorkspaceCodeFile[] = [];
     for (const f of snapshot?.files ?? []) {
@@ -96,7 +96,7 @@ export class NexoProjectService {
       if (!read || typeof read.content !== 'string') return { ok: false, binary: false, content: '' };
       return { ok: !!read.ok, binary: !!read.binary, content: read.content };
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo leer el archivo.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo leer el archivo.', error instanceof Error ? error.name : '');
       return { ok: false, binary: false, content: '' };
     }
   }
@@ -107,7 +107,7 @@ export class NexoProjectService {
       const read = await this.bridge.request<ReadFileResult | null>({ op: 'readFile', fileId: file.id, as: 'base64', maxBytes });
       return read && read.ok && typeof read.content === 'string' ? read.content : null;
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo leer el archivo binario.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo leer el archivo binario.', error instanceof Error ? error.name : '');
       return null;
     }
   }
@@ -118,7 +118,7 @@ export class NexoProjectService {
       const read = await this.bridge.request<string | null>({ op: 'readMountFile', mountId, path: relPath, as, maxBytes });
       return typeof read === 'string' ? read : null;
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo leer el archivo del montaje.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo leer el archivo del montaje.', error instanceof Error ? error.name : '');
       return null;
     }
   }

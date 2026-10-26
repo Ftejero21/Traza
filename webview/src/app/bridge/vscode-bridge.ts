@@ -67,7 +67,7 @@ export class VsCodeBridge extends NexoBridge {
     try {
       return plainState(this.api.getState())[key];
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo leer el estado de la vista.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo leer el estado de la vista.', error instanceof Error ? error.name : '');
       return undefined;
     }
   }
@@ -77,7 +77,7 @@ export class VsCodeBridge extends NexoBridge {
       const prev = plainState(this.api.getState());
       this.api.setState({ ...prev, [key]: value });
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo guardar el estado de la vista.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo guardar el estado de la vista.', error instanceof Error ? error.name : '');
     }
   }
 

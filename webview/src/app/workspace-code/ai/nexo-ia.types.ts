@@ -283,7 +283,7 @@ export interface FlowDiagnosis {
   where: CodeRef | null;
   /** Campo culpable con su valor: 'comment = null'. */
   field?: string;
-  /** Conclusión de Nexo: la cadena causal completa, citando pasos, clases y líneas. */
+  /** Conclusión de Traza: la cadena causal completa, citando pasos, clases y líneas. */
   conclusion: string;
   /** Qué ve el usuario final. */
   userImpact: string;

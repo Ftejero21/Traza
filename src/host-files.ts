@@ -13,7 +13,7 @@ const SAMPLE_LANGUAGES: Record<string, string> = {
 };
 
 function warn(message: string, error: unknown): void {
-  console.warn(`[Nexo] ${message}`, error instanceof Error ? error.name : '');
+  console.warn(`[Traza] ${message}`, error instanceof Error ? error.name : '');
 }
 
 function baseName(path: string): string {

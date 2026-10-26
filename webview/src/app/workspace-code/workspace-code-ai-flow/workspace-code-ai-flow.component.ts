@@ -562,7 +562,7 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     this.closeStepMenu();
     const text = this.flowService.stepReference(index);
     const fail = (error?: unknown): void => {
-      if (error !== undefined) console.warn('[Nexo IA] No se pudo copiar la referencia.', error instanceof Error ? error.name : '');
+      if (error !== undefined) console.warn('[Traza] No se pudo copiar la referencia.', error instanceof Error ? error.name : '');
       this.notify.show(this.i18n.t('aiFlow.stepMenu.copyFailed'), 'warning');
     };
     if (!text) {

@@ -65,7 +65,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
         const proposal = await this.fromRaw(item, flow, list);
         if (proposal) list.push(proposal);
       } catch (error: unknown) {
-        console.warn('[Nexo IA] No se pudo cargar una propuesta de cambio.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo cargar una propuesta de cambio.', error instanceof Error ? error.name : '');
       }
     }
     this.proposals = list;
@@ -77,7 +77,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     const request = typeof record?.['request'] === 'string' ? (record['request'] as string) : '';
     const proposal = sanitizeChangeProposal(raw, request, false);
     if (!proposal) {
-      console.warn('[Nexo IA] Propuesta de cambio con formato no válido: se omite.');
+      console.warn('[Traza] Propuesta de cambio con formato no válido: se omite.');
       return null;
     }
     const mounts = this.project.project.mounts;
@@ -87,19 +87,19 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     for (const change of proposal.files) {
       const target = resolveChangeTarget(mounts, byPath, change);
       if (!target || !this.allowed(target.path) || paths.has(target.path)) {
-        console.warn('[Nexo IA] Propuesta de cambio con una ruta no permitida: se omite.');
+        console.warn('[Traza] Propuesta de cambio con una ruta no permitida: se omite.');
         return null;
       }
       paths.add(target.path);
       const file = this.project.fileByPath(target.path) ?? null;
       const original = file ? await this.readChangeFile(file) : null;
       if (file && original === null) {
-        console.warn('[Nexo IA] Propuesta de cambio sobre un archivo que no se puede leer: se omite.');
+        console.warn('[Traza] Propuesta de cambio sobre un archivo que no se puede leer: se omite.');
         return null;
       }
       const applied = applyFileChange(original, change);
       if (!applied.ok) {
-        console.warn('[Nexo IA] Propuesta de cambio cuyo diff no encaja con el archivo: se omite.');
+        console.warn('[Traza] Propuesta de cambio cuyo diff no encaja con el archivo: se omite.');
         return null;
       }
       files.push({
@@ -240,7 +240,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     try {
       await this.applyProposal(found);
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo aplicar el cambio propuesto.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo aplicar el cambio propuesto.', error instanceof Error ? error.name : '');
       this.notify.show(this.i18n.t('aiChange.applyFailed'), 'danger');
     } finally {
       this.running.delete(found.proposal.id);
@@ -328,7 +328,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     const result = await this.writeFiles(writes);
     if (!result.ok) {
       const restore = await this.writeFiles(snapshot.files.map((f) => ({ path: f.path, content: f.previousContent })));
-      if (!restore.ok) console.warn('[Nexo IA] No se pudo restaurar el contenido tras un fallo al aplicar.');
+      if (!restore.ok) console.warn('[Traza] No se pudo restaurar el contenido tras un fallo al aplicar.');
       this.notify.show(result.error || this.i18n.t('aiChange.applyFailed'), 'danger');
       return;
     }
@@ -371,7 +371,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     try {
       await this.undoProposal(found, snapshot);
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo deshacer el cambio aplicado.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo deshacer el cambio aplicado.', error instanceof Error ? error.name : '');
       this.notify.show(this.i18n.t('aiChange.applyFailed'), 'danger');
     } finally {
       this.running.delete(found.proposal.id);
@@ -426,7 +426,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     try {
       return await this.project.writeFiles(writes);
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudieron escribir los archivos.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron escribir los archivos.', error instanceof Error ? error.name : '');
       return { ok: false, error: (error instanceof Error && error.message) || this.i18n.t('aiChange.applyFailed') };
     }
   }
@@ -436,7 +436,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
     try {
       return (await this.bridge.request<boolean>({ op: 'confirm', title: title.slice(0, 200), message: message.slice(0, 1000), confirm: confirm.slice(0, 60) })) === true;
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo mostrar la confirmación.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo mostrar la confirmación.', error instanceof Error ? error.name : '');
       this.notify.show(this.i18n.t('ai.error.generic'), 'danger');
       return false;
     }

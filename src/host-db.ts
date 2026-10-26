@@ -14,7 +14,7 @@ import type {
 import { DB_KEY_PATTERN, LOCAL_HOSTS, normalizeCodePath } from './host-guards';
 
 /*
- * Conexiones de base de datos de la vista de flujo (modo «Base de datos»): configuración en `nexo.databases`, contraseña
+ * Conexiones de base de datos de la vista de flujo (modo «Base de datos»): configuración en `traza.databases`, contraseña
  * en SecretStorage y lectura de la metadata (tablas, columnas, claves e índices) en SOLO LECTURA. Nunca se ejecuta SQL de
  * la IA ni se leen filas: solo consultas fijas y parametrizadas a `information_schema` / `pg_catalog`.
  */
@@ -35,7 +35,7 @@ export interface DbConfig {
 }
 
 const SETTING = 'databases';
-const SECRET_PREFIX = 'nexo.db.password.';
+const SECRET_PREFIX = 'traza.db.password.';
 const PROVIDERS: readonly DbProvider[] = ['postgresql', 'mysql', 'mariadb'];
 const CACHE_MS = 60_000;
 const CONNECT_TIMEOUT_MS = 8_000;
@@ -63,12 +63,12 @@ const MSG = {
   provider: 'Proveedor de base de datos no soportado.',
   generic: 'No se pudo leer el esquema de la base de datos.',
   missing: 'No existe esa conexión de base de datos.',
-  password: 'Falta la contraseña de la base de datos. Usa "Nexo: Contraseña de base de datos".',
+  password: 'Falta la contraseña de la base de datos. Usa "Traza: Contraseña de base de datos".',
   tls: 'Para un servidor remoto activa "ssl": solo se permite conexión sin TLS en localhost.',
 };
 
 function warn(message: string, error: unknown): void {
-  console.warn(`[Nexo] ${message}`, error instanceof Error ? error.name : '');
+  console.warn(`[Traza] ${message}`, error instanceof Error ? error.name : '');
 }
 
 function secretKey(id: string): string {
@@ -98,7 +98,7 @@ function str(value: unknown, max: number): string | null {
   return typeof value === 'string' && value.trim() && value.length <= max ? value.trim() : null;
 }
 
-/** Entrada de `nexo.databases` validada; `null` si no es válida. */
+/** Entrada de `traza.databases` validada; `null` si no es válida. */
 function parseConfig(raw: unknown): DbConfig | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
@@ -126,15 +126,15 @@ function parseConfig(raw: unknown): DbConfig | null {
   return config;
 }
 
-/** Conexiones válidas de `nexo.databases` (las inválidas o repetidas se ignoran con un aviso). */
+/** Conexiones válidas de `traza.databases` (las inválidas o repetidas se ignoran con un aviso). */
 export function readDbConfigs(): DbConfig[] {
-  const raw = vscode.workspace.getConfiguration('nexo').get<unknown>(SETTING);
+  const raw = vscode.workspace.getConfiguration('traza').get<unknown>(SETTING);
   const list = Array.isArray(raw) ? raw : [];
   const out: DbConfig[] = [];
   for (const item of list) {
     const config = parseConfig(item);
     if (!config || out.some((c) => c.id === config.id)) {
-      console.warn('[Nexo] Conexión de base de datos no válida en "nexo.databases": se ignora.');
+      console.warn('[Traza] Conexión de base de datos no válida en "traza.databases": se ignora.');
       continue;
     }
     out.push(config);
@@ -195,7 +195,7 @@ async function pgMetadata(config: DbConfig, password: string): Promise<Workspace
     connectionTimeoutMillis: CONNECT_TIMEOUT_MS,
     options: `-c default_transaction_read_only=on -c statement_timeout=${QUERY_TIMEOUT_MS}`,
     ssl: config.ssl ? { rejectUnauthorized: true } : false,
-    application_name: 'nexo-vscode',
+    application_name: 'traza',
   };
   const client: PgClient = new pg.Client(options);
   client.on('error', (error: unknown) => warn('Error de la conexión PostgreSQL.', error));
@@ -401,7 +401,7 @@ export class HostDb {
     return promise;
   }
 
-  /** «Nexo: Probar conexión de base de datos»: número de tablas. */
+  /** «Traza: Probar conexión de base de datos»: número de tablas. */
   async test(key: string): Promise<number> {
     return (await this.metadata(key, true)).tables.length;
   }
@@ -488,15 +488,15 @@ function settingsTarget(): vscode.ConfigurationTarget {
 
 /** Añade la conexión al ajuste conservando el resto de entradas tal cual. */
 async function appendConfig(config: DbConfig): Promise<void> {
-  const raw = vscode.workspace.getConfiguration('nexo').get<unknown>(SETTING);
+  const raw = vscode.workspace.getConfiguration('traza').get<unknown>(SETTING);
   const list = Array.isArray(raw) ? [...raw] : [];
-  await vscode.workspace.getConfiguration('nexo').update(SETTING, [...list, config], settingsTarget());
+  await vscode.workspace.getConfiguration('traza').update(SETTING, [...list, config], settingsTarget());
 }
 
 async function pickConnection(placeHolder: string): Promise<DbConfig | null> {
   const list = readDbConfigs();
   if (!list.length) {
-    void vscode.window.showInformationMessage('No hay conexiones de base de datos. Usa "Nexo: Añadir conexión de base de datos".');
+    void vscode.window.showInformationMessage('No hay conexiones de base de datos. Usa "Traza: Añadir conexión de base de datos".');
     return null;
   }
   const choice = await vscode.window.showQuickPick(
@@ -544,7 +544,7 @@ async function addDatabase(secrets: vscode.SecretStorage, onChange: () => void):
     if (!choice) return;
     base = choice.candidate ?? {};
   }
-  const title = 'Nexo: Añadir conexión de base de datos';
+  const title = 'Traza: Añadir conexión de base de datos';
   const id = await input(title, base.database ? base.database.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 40) : '',
     (v) => (!DB_KEY_PATTERN.test(v) ? 'Solo letras, números, "-" y "_" (1–40).' : existing.some((c) => c.id === v) ? 'Ya existe una conexión con ese id.' : null),
     'Identificador de la conexión');
@@ -601,10 +601,10 @@ async function addDatabase(secrets: vscode.SecretStorage, onChange: () => void):
 async function removeDatabase(secrets: vscode.SecretStorage, onChange: () => void): Promise<void> {
   const config = await pickConnection('Conexión que quieres quitar');
   if (!config) return;
-  const raw = vscode.workspace.getConfiguration('nexo').get<unknown>(SETTING);
+  const raw = vscode.workspace.getConfiguration('traza').get<unknown>(SETTING);
   const list = (Array.isArray(raw) ? raw : []).filter((item) => !(item && typeof item === 'object' && (item as { id?: unknown }).id === config.id));
   try {
-    await vscode.workspace.getConfiguration('nexo').update(SETTING, list, settingsTarget());
+    await vscode.workspace.getConfiguration('traza').update(SETTING, list, settingsTarget());
     await secrets.delete(secretKey(config.id));
   } catch (error: unknown) {
     warn('No se pudo quitar la conexión.', error);
@@ -640,12 +640,12 @@ export function registerDbCommands(context: vscode.ExtensionContext, onChange: (
     onChange();
   };
   return [
-    vscode.commands.registerCommand('nexo.addDatabase', () => addDatabase(context.secrets, changed)),
-    vscode.commands.registerCommand('nexo.setDatabasePassword', async () => {
+    vscode.commands.registerCommand('traza.addDatabase', () => addDatabase(context.secrets, changed)),
+    vscode.commands.registerCommand('traza.setDatabasePassword', async () => {
       const config = await pickConnection('Conexión cuya contraseña quieres cambiar');
       if (config && (await askPassword(context.secrets, config))) changed();
     }),
-    vscode.commands.registerCommand('nexo.testDatabase', () => testDatabase(db)),
-    vscode.commands.registerCommand('nexo.removeDatabase', () => removeDatabase(context.secrets, changed)),
+    vscode.commands.registerCommand('traza.testDatabase', () => testDatabase(db)),
+    vscode.commands.registerCommand('traza.removeDatabase', () => removeDatabase(context.secrets, changed)),
   ];
 }

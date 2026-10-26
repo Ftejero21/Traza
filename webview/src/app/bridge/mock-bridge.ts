@@ -31,10 +31,10 @@ export class MockBridge extends NexoBridge {
         this.toast$.next({ id: ++this.toastSeq, level: msg.level, text: msg.text });
         break;
       case 'openRef':
-        console.info('[Nexo] Abrir en el editor (modo navegador):', msg.sample?.path ?? msg.fileId, msg.line);
+        console.info('[Traza] Abrir en el editor (modo navegador):', msg.sample?.path ?? msg.fileId, msg.line);
         break;
       case 'ask':
-        console.info('[Nexo] Preguntar a la IA (modo navegador):', msg.text);
+        console.info('[Traza] Preguntar a la IA (modo navegador):', msg.text);
         break;
       case 'cancel':
         this.cancel(msg.id);
@@ -49,7 +49,7 @@ export class MockBridge extends NexoBridge {
     if (this.started) return;
     this.started = true;
     setTimeout(() => {
-      this.subject.next({ type: 'init', language: 'es', modelName: 'Modelo de ejemplo', theme: 'nexo' });
+      this.subject.next({ type: 'init', language: 'es', modelName: 'Modelo de ejemplo', theme: 'traza' });
       this.subject.next({ type: 'openFlow', flow: SAMPLE_FLOW, sample: true, proposals: SAMPLE_PROPOSALS });
     });
   }

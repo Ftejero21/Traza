@@ -1,6 +1,6 @@
 /**
  * IA en el host con el modelo de lenguaje que el usuario ya tiene en VS Code (`vscode.lm`: Copilot, Claude, GPT,
- * BYOK…). Sustituye al backend de Nexo: arma los prompts portados de tejechat, valida la salida (esquema + semántica,
+ * BYOK…). Sustituye al backend de Traza: arma los prompts portados de tejechat, valida la salida (esquema + semántica,
  * con un reintento conversacional) y devuelve las mismas formas que esperan los sanitizadores de la webview.
  * Nunca registra código, prompts, respuestas ni preguntas: solo códigos, tamaños y tiempos.
  */
@@ -24,12 +24,18 @@ type Obj = Record<string, unknown>;
 
 let validationLog: vscode.LogOutputChannel | null = null;
 
-/** Diagnóstico en el canal «Nexo»: operación, modelo, tamaño de la respuesta y errores de esquema (nunca su contenido). */
+/** Canal de salida «Traza» (se crea al primer uso). */
+export function trazaLog(): vscode.LogOutputChannel {
+  validationLog ??= vscode.window.createOutputChannel('Traza', { log: true });
+  return validationLog;
+}
+
+/** Diagnóstico en el canal «Traza»: operación, modelo, tamaño de la respuesta y errores de esquema (nunca su contenido). */
 function logValidation(op: PromptOp, model: vscode.LanguageModelChat, attempt: number, text: string, errors: string[]): void {
-  validationLog ??= vscode.window.createOutputChannel('Nexo', { log: true });
+  const log = trazaLog();
   const shape = text.trimStart().startsWith('{') ? 'json' : text.includes('{') ? 'texto+json' : 'sin json';
-  validationLog.warn(`${op} · ${model.name} (${model.vendor}/${model.family}) · intento ${attempt} · ${text.length} caracteres (${shape})`);
-  for (const error of errors.slice(0, 20)) validationLog.warn(`  ${cut(error, 300)}`);
+  log.warn(`${op} · ${model.name} (${model.vendor}/${model.family}) · intento ${attempt} · ${text.length} caracteres (${shape})`);
+  for (const error of errors.slice(0, 20)) log.warn(`  ${cut(error, 300)}`);
 }
 
 /** Nombre visible del modelo: «Auto · claude-fable-5.1» cuando la familia añade información al nombre. */
@@ -40,11 +46,10 @@ function modelLabel(model: vscode.LanguageModelChat): string {
 
 /** Diagnóstico: modelos que VS Code expone a la extensión (nombre, proveedor y familia). */
 function logModels(models: readonly vscode.LanguageModelChat[]): void {
-  validationLog ??= vscode.window.createOutputChannel('Nexo', { log: true });
-  validationLog.info(`Modelos disponibles: ${models.map((m) => `${m.name} (${m.vendor}/${m.family || '-'})`).join(', ') || 'ninguno'}`);
+  trazaLog().info(`Modelos disponibles: ${models.map((m) => `${m.name} (${m.vendor}/${m.family || '-'})`).join(', ') || 'ninguno'}`);
 }
 
-const NOTICE_KEY = 'nexo.aiNoticeShown';
+const NOTICE_KEY = 'traza.aiNoticeShown';
 const CALL_TIMEOUT_MS = 180_000;
 const GENERATION_TIMEOUT_MS = 300_000;
 const MAX_RESPONSE_CHARS = 300_000;
@@ -103,13 +108,13 @@ const ENDPOINT_PATTERN = /^(GET|POST|PUT|PATCH|DELETE) \/[\w\-/{}.:]{0,120}$/;
 const MESSAGES = {
   es: {
     noModels: 'No hay modelos de lenguaje disponibles en VS Code. Instala o inicia sesión en GitHub Copilot u otro proveedor.',
-    modelMissing: 'El modelo configurado no está disponible. Usa «Nexo: Elegir modelo».',
-    noPermissions: 'No has dado permiso a Nexo para usar el modelo. Vuelve a intentarlo y acepta el permiso.',
+    modelMissing: 'El modelo configurado no está disponible. Usa «Traza: Elegir modelo».',
+    noPermissions: 'No has dado permiso a Traza para usar el modelo. Vuelve a intentarlo y acepta el permiso.',
     blocked: 'El proveedor ha bloqueado la petición (límite o política). Inténtalo más tarde.',
     failed: 'El modelo no pudo completar la petición.',
     timeout: 'El modelo no respondió a tiempo.',
     schema: 'La respuesta del modelo no tiene el formato esperado.',
-    empty: 'El modelo «{model}» no ha devuelto ninguna respuesta. Comprueba que tienes la sesión iniciada en su proveedor o elige otro con «Nexo: Elegir modelo».',
+    empty: 'El modelo «{model}» no ha devuelto ninguna respuesta. Comprueba que tienes la sesión iniciada en su proveedor o elige otro con «Traza: Elegir modelo».',
     tooLarge: 'La respuesta del modelo es demasiado grande.',
     invalid: 'El contexto de la petición no es válido.',
     uiTooLarge: 'El contexto de la pantalla es demasiado grande.',
@@ -119,22 +124,22 @@ const MESSAGES = {
     dbTooLong: 'El contexto de la tabla es demasiado largo para generar la explicación.',
     dbInvalid: 'El contexto de la tabla no es válido.',
     dbBadOutput: 'La IA no devolvió pasos válidos.',
-    justification: 'Nexo envía el código relevante del proyecto (sin archivos sensibles y con secretos enmascarados) a este modelo para generar y simular el flujo.',
-    notice: 'Nexo usa el modelo de lenguaje que elijas en VS Code: el código relevante del proyecto (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.',
-    pickTitle: 'Nexo: Elegir modelo',
-    pickPlaceholder: 'Modelo de VS Code que usará Nexo',
+    justification: 'Traza envía el código relevante del proyecto (sin archivos sensibles y con secretos enmascarados) a este modelo para generar y simular el flujo.',
+    notice: 'Traza usa el modelo de lenguaje que elijas en VS Code: el código relevante del proyecto (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.',
+    pickTitle: 'Traza: Elegir modelo',
+    pickPlaceholder: 'Modelo de VS Code que usará Traza',
     auto: 'Automático',
     autoDetail: 'Elegir el modelo la próxima vez que se use',
   },
   en: {
     noModels: 'No language models are available in VS Code. Install or sign in to GitHub Copilot or another provider.',
-    modelMissing: 'The configured model is not available. Use "Nexo: Elegir modelo".',
-    noPermissions: 'You have not allowed Nexo to use the model. Try again and accept the permission.',
+    modelMissing: 'The configured model is not available. Use "Traza: Elegir modelo".',
+    noPermissions: 'You have not allowed Traza to use the model. Try again and accept the permission.',
     blocked: 'The provider blocked the request (quota or policy). Please try again later.',
     failed: 'The model could not complete the request.',
     timeout: 'The model did not respond in time.',
     schema: 'The model response does not have the expected format.',
-    empty: 'The model "{model}" returned no response. Make sure you are signed in to its provider or pick another one with "Nexo: Elegir modelo".',
+    empty: 'The model "{model}" returned no response. Make sure you are signed in to its provider or pick another one with "Traza: Elegir modelo".',
     tooLarge: 'The model response is too large.',
     invalid: 'The request context is not valid.',
     uiTooLarge: 'The screen context is too large.',
@@ -144,10 +149,10 @@ const MESSAGES = {
     dbTooLong: 'The table context is too long to generate the explanation.',
     dbInvalid: 'The table context is not valid.',
     dbBadOutput: 'The AI did not return valid steps.',
-    justification: 'Nexo sends the relevant project code (without sensitive files and with masked secrets) to this model to generate and simulate the flow.',
-    notice: 'Nexo uses the language model you choose in VS Code: the relevant project code (without sensitive files and with masked secrets) is sent to that model\'s provider.',
-    pickTitle: 'Nexo: Elegir modelo',
-    pickPlaceholder: 'VS Code model that Nexo will use',
+    justification: 'Traza sends the relevant project code (without sensitive files and with masked secrets) to this model to generate and simulate the flow.',
+    notice: 'Traza uses the language model you choose in VS Code: the relevant project code (without sensitive files and with masked secrets) is sent to that model\'s provider.',
+    pickTitle: 'Traza: Elegir modelo',
+    pickPlaceholder: 'VS Code model that Traza will use',
     auto: 'Automatic',
     autoDetail: 'Choose the model the next time it is used',
   },
@@ -220,7 +225,7 @@ class AiError extends Error {
 }
 
 function language(): NexoLanguage {
-  return vscode.workspace.getConfiguration('nexo').get<string>('language') === 'en' ? 'en' : 'es';
+  return vscode.workspace.getConfiguration('traza').get<string>('language') === 'en' ? 'en' : 'es';
 }
 
 function t(key: MessageKey, lang: NexoLanguage = language()): string {
@@ -589,7 +594,7 @@ export class HostAi {
     return this.context.secrets;
   }
 
-  /** Último flujo generado (comando o `@nexo`), para «Abrir flujo». */
+  /** Último flujo generado (comando o `@traza`), para «Abrir flujo». */
   get lastGenerated(): GeneratedFlow | null {
     return this.last;
   }
@@ -602,7 +607,7 @@ export class HostAi {
   /* ------------------------------ modelo ------------------------------ */
 
   private configuredModel(): { vendor?: string; family?: string; id?: string } | null {
-    const raw = vscode.workspace.getConfiguration('nexo').get<unknown>('model');
+    const raw = vscode.workspace.getConfiguration('traza').get<unknown>('model');
     if (!isObj(raw)) return null;
     const pick = (k: string): string | undefined => (typeof raw[k] === 'string' && (raw[k] as string).trim() ? (raw[k] as string).trim() : undefined);
     const out = { vendor: pick('vendor'), family: pick('family'), id: pick('id') };
@@ -611,7 +616,7 @@ export class HostAi {
 
   private async saveModel(model: vscode.LanguageModelChat | null): Promise<void> {
     const value = model ? { vendor: model.vendor, family: model.family, id: model.id } : undefined;
-    await vscode.workspace.getConfiguration('nexo').update('model', value, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration('traza').update('model', value, vscode.ConfigurationTarget.Global);
   }
 
   /**
@@ -662,13 +667,13 @@ export class HostAi {
     return choice?.model;
   }
 
-  /** Comando «Nexo: Elegir modelo». */
+  /** Comando «Traza: Elegir modelo». */
   async selectModelCommand(): Promise<void> {
     try {
       const choice = await this.pickModel();
       if (choice === undefined) return;
       await this.saveModel(choice === 'auto' ? null : choice);
-      void vscode.window.showInformationMessage(choice === 'auto' ? `Nexo: ${t('auto')}` : `Nexo: ${choice.name}`);
+      void vscode.window.showInformationMessage(choice === 'auto' ? `Traza: ${t('auto')}` : `Traza: ${choice.name}`);
     } catch (error: unknown) {
       void vscode.window.showErrorMessage(error instanceof Error ? error.message : t('failed'));
     }
@@ -730,7 +735,7 @@ export class HostAi {
     try {
       return (await model.countTokens(system, token)) + (await model.countTokens(user, token));
     } catch (error: unknown) {
-      console.warn('[Nexo] countTokens no disponible.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] countTokens no disponible.', error instanceof Error ? error.name : '');
       return null;
     }
   }
@@ -782,19 +787,19 @@ export class HostAi {
       if (timedOut) throw new AiError(t('timeout', lang));
       if (token.isCancellationRequested || cts.token.isCancellationRequested) throw new Error('cancelled');
       if (error instanceof vscode.LanguageModelError) {
-        console.warn('[Nexo] Error del modelo.', error.code || error.name);
+        console.warn('[Traza] Error del modelo.', error.code || error.name);
         if (error.code === vscode.LanguageModelError.NoPermissions().code) throw new AiError(t('noPermissions', lang));
         if (error.code === vscode.LanguageModelError.Blocked().code) throw new AiError(t('blocked', lang));
         if (error.code === vscode.LanguageModelError.NotFound().code) throw new AiError(t('modelMissing', lang));
         throw new AiError(`${t('failed', lang)} ${cut(error.message || '', 200)}`.trim());
       }
-      console.warn('[Nexo] Fallo al llamar al modelo.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] Fallo al llamar al modelo.', error instanceof Error ? error.name : '');
       throw new AiError(`${t('failed', lang)} ${error instanceof Error ? cut(error.message || '', 200) : ''}`.trim());
     } finally {
       clearTimeout(timer);
       link.dispose();
       cts.dispose();
-      console.info('[Nexo] Llamada al modelo.', Date.now() - started, 'ms');
+      console.info('[Traza] Llamada al modelo.', Date.now() - started, 'ms');
     }
   }
 
@@ -824,7 +829,7 @@ export class HostAi {
     };
     let { text, result } = await attempt(messages);
     if (result.errors.length) {
-      console.warn('[Nexo] Respuesta no válida; reintento.', op, result.errors.length);
+      console.warn('[Traza] Respuesta no válida; reintento.', op, result.errors.length);
       logValidation(op, model, 1, text, result.errors);
       const retry = [
         ...messages,
@@ -833,7 +838,7 @@ export class HostAi {
       ];
       ({ text, result } = await attempt(retry));
       if (result.errors.length) {
-        console.warn('[Nexo] Respuesta no válida tras el reintento.', op, result.errors.length);
+        console.warn('[Traza] Respuesta no válida tras el reintento.', op, result.errors.length);
         logValidation(op, model, 2, text, result.errors);
         throw new AiError(t('schema', lang));
       }
@@ -953,7 +958,7 @@ export class HostAi {
         afterCode = afterWindows(d.code, files);
       } catch (error: unknown) {
         if (error instanceof PatchError) {
-          console.warn('[Nexo] El cambio no encaja.', error.message);
+          console.warn('[Traza] El cambio no encaja.', error.message);
           throw new AiError(t('noFit', lang));
         }
         throw error;

@@ -21,7 +21,7 @@ export abstract class NexoBridge {
     try {
       if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
     } catch (error: unknown) {
-      console.warn('[Nexo] randomUUID no disponible.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] randomUUID no disponible.', error instanceof Error ? error.name : '');
     }
     return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
   }

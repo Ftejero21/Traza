@@ -3,7 +3,7 @@ import { P, SAMPLE_FILES, SAMPLE_FLOW, lineOf } from './sample-project';
 import { simulatePreset } from './sample-results';
 
 /*
- * Propuesta de cambio del ejemplo (modo navegador y «Nexo: Abrir flujo de ejemplo»): el login responde lo mismo cuando
+ * Propuesta de cambio del ejemplo (modo navegador y «Traza: Abrir flujo de ejemplo»): el login responde lo mismo cuando
  * el email no existe que cuando la contraseña no coincide. Las líneas del diff salen del archivo virtual real.
  */
 

@@ -400,7 +400,7 @@ export function trimGlobalCss(css: string, usedTokens: Set<string>): string {
   try {
     return walk(text);
   } catch (error: unknown) {
-    console.warn('[Nexo IA] No se pudo recortar el CSS global.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] No se pudo recortar el CSS global.', error instanceof Error ? error.name : '');
     return text;
   }
 }
@@ -855,7 +855,7 @@ export function trimTemplateForAi(
     if (!out.trim() || out.length > max) out = htmlPrefix(src, max);
     return { html: out, trimmed: true };
   } catch (error: unknown) {
-    console.warn('[Nexo IA] No se pudo recortar la plantilla.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] No se pudo recortar la plantilla.', error instanceof Error ? error.name : '');
     return { html: htmlPrefix(source, max), trimmed: true };
   }
 }

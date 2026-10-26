@@ -1,5 +1,5 @@
 /**
- * Chat participant `@nexo` (id `nexo.flow`): sin comando o con `/flujo` genera el flujo con el modelo del chat y lo
+ * Chat participant `@traza` (id `traza.flow`): sin comando o con `/flujo` genera el flujo con el modelo del chat y lo
  * abre en el panel; `/cambio` propone un cambio sobre el flujo abierto. Los textos de la IA se escapan antes de
  * mostrarse y nunca llevan enlaces de comando confiables.
  */
@@ -30,8 +30,8 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
     const prompt = request.prompt.trim();
     if (!prompt) {
       stream.markdown(es
-        ? 'Escribe qué proceso quieres ver, por ejemplo: `@nexo ¿cómo funciona el login?`.  \nCon `/cambio <petición>` propongo un cambio sobre el flujo abierto.'
-        : 'Describe the process you want to see, for example: `@nexo how does login work?`.  \nWith `/cambio <request>` I propose a change on the open flow.');
+        ? 'Escribe qué proceso quieres ver, por ejemplo: `@traza ¿cómo funciona el login?`.  \nCon `/cambio <petición>` propongo un cambio sobre el flujo abierto.'
+        : 'Describe the process you want to see, for example: `@traza how does login work?`.  \nWith `/cambio <request>` I propose a change on the open flow.');
       return {};
     }
     try {
@@ -39,8 +39,8 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
         const current = FlowPanel.currentFlow();
         if (!current) {
           stream.markdown(es
-            ? 'No hay ningún flujo abierto. Genera uno con `@nexo <pregunta>` o abre uno con «Nexo: Flujo».'
-            : 'No flow is open. Generate one with `@nexo <question>` or open one with "Nexo: Flujo".');
+            ? 'No hay ningún flujo abierto. Genera uno con `@traza <pregunta>` o abre uno con «Traza: Flujo».'
+            : 'No flow is open. Generate one with `@traza <question>` or open one with "Traza: Flujo".');
           return {};
         }
         stream.progress(es ? 'Preparando el cambio…' : 'Preparing the change…');
@@ -75,17 +75,17 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
       if (location) stream.anchor(location, es ? 'Ver dónde falla' : 'See where it fails');
       const flowId = typeof generated.flow['id'] === 'string' ? generated.flow['id'] : '';
       stream.button({
-        command: 'nexo.showFlow', arguments: flowId ? [{ flowId }] : [],
+        command: 'traza.showFlow', arguments: flowId ? [{ flowId }] : [],
         title: es ? 'Visualizar flujo' : 'Visualize flow',
       });
       return {};
     } catch (error: unknown) {
       if (isCancelled(error) || token.isCancellationRequested) return {};
-      console.warn('[Nexo] Error en @nexo.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] Error en @traza.', error instanceof Error ? error.name : '');
       return { errorDetails: { message: errorMessage(error) } };
     }
   };
-  const participant = vscode.chat.createChatParticipant('nexo.flow', handler);
+  const participant = vscode.chat.createChatParticipant('traza.flow', handler);
   participant.iconPath = new vscode.ThemeIcon('type-hierarchy-sub');
   return [participant];
 }

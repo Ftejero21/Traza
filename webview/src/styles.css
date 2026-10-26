@@ -1,9 +1,9 @@
 /*
- * Tema de la vista de flujo (`nexo.theme`, el host lo envía en `init`/`config` y la webview lo refleja en
- * `html[data-nexo-theme]`). Por defecto `nexo`: paleta y fuentes originales de Nexo (chatFront), oscura o clara según
+ * Tema de la vista de flujo (`traza.theme`, el host lo envía en `init`/`config` y la webview lo refleja en
+ * `html[data-traza-theme]`). Por defecto `traza`: paleta y fuentes originales de Traza (chatFront), oscura o clara según
  * las clases `vscode-light` / `vscode-high-contrast-light` que VS Code pone en el `body`. Con `vscode`, las variables
  * `--wce-*` del editor de chatFront se mapean a los tokens del tema activo de VS Code (`--vscode-*`). Fuera de VS Code
- * (navegador) se usa Nexo Oscuro. Sin fuentes remotas: pilas con fallback del sistema.
+ * (navegador) se usa Traza Oscuro. Sin fuentes remotas: pilas con fallback del sistema.
  */
 body {
   color-scheme: dark;
@@ -107,7 +107,7 @@ body.vscode-high-contrast-light {
   --wce-gradient:linear-gradient(90deg,#6366f1,#7c3aed,#ec4899,#f97316);
 }
 
-html[data-nexo-theme='vscode'] body {
+html[data-traza-theme='vscode'] body {
   color-scheme: normal;
   --wce-bg: var(--vscode-editor-background, #0d1220);
   --wce-editor-bg: var(--vscode-editor-background, #0d1220);

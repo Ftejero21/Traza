@@ -1,7 +1,7 @@
 /**
- * Herramienta del modo agente `nexo_flow` (Language Model Tool): genera el flujo de un proceso del proyecto con el
- * pipeline existente de Nexo, lo abre en el panel y devuelve al agente un resumen en texto acotado. No modifica
- * archivos. Pide confirmación siempre antes de enviar código al proveedor del modelo configurado en Nexo.
+ * Herramienta del modo agente `traza_flow` (Language Model Tool): genera el flujo de un proceso del proyecto con el
+ * pipeline existente de Traza, lo abre en el panel y devuelve al agente un resumen en texto acotado. No modifica
+ * archivos. Pide confirmación siempre antes de enviar código al proveedor del modelo configurado en Traza.
  */
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -100,15 +100,15 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
       const question = typeof raw === 'string' ? oneLine(raw, MAX_CONFIRM_QUESTION) : '';
       const message = new vscode.MarkdownString();
       message.appendText(es
-        ? 'Nexo enviará al proveedor del modelo configurado en Nexo las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). No se modificará ningún archivo.\n\nPregunta: '
-        : 'Nexo will send the relevant workspace paths and code fragments to the provider of the model configured in Nexo (never sensitive files such as .env or keys, and with secrets masked). No file will be modified.\n\nQuestion: ');
+        ? 'Traza enviará al proveedor del modelo configurado en Traza las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). No se modificará ningún archivo.\n\nPregunta: '
+        : 'Traza will send the relevant workspace paths and code fragments to the provider of the model configured in Traza (never sensitive files such as .env or keys, and with secrets masked). No file will be modified.\n\nQuestion: ');
       message.appendText(question);
       const rawQuestion = typeof raw === 'string' ? raw : '';
       const folder = rawQuestion ? resolveFlowFolder(rawQuestion, projectOf(options.input)) : null;
       if (folder) message.appendText(`\n\n${es ? 'Carpeta' : 'Folder'}: ${oneLine(folder.name, MAX_PROJECT)}`);
       return {
-        invocationMessage: es ? 'Generando el flujo con Nexo…' : 'Generating the flow with Nexo…',
-        confirmationMessages: { title: es ? 'Generar flujo con Nexo' : 'Generate flow with Nexo', message },
+        invocationMessage: es ? 'Generando el flujo con Traza…' : 'Generating the flow with Traza…',
+        confirmationMessages: { title: es ? 'Generar flujo con Traza' : 'Generate flow with Traza', message },
       };
     },
     async invoke(options, token) {
@@ -138,8 +138,8 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
             ? 'La generación del flujo se canceló (se inició otra generación o no se eligió modelo).'
             : 'The flow generation was cancelled (another generation started or no model was chosen).')]);
         }
-        console.warn('[Nexo] Error en la herramienta nexo_flow.', error instanceof Error ? error.name : '');
-        throw new Error(`${isSpanish() ? 'Nexo no pudo generar el flujo: ' : 'Nexo could not generate the flow: '}${errorMessage(error)}`);
+        console.warn('[Traza] Error en la herramienta traza_flow.', error instanceof Error ? error.name : '');
+        throw new Error(`${isSpanish() ? 'Traza no pudo generar el flujo: ' : 'Traza could not generate the flow: '}${errorMessage(error)}`);
       } finally {
         listener.dispose();
         if (currentRun === cts) currentRun = undefined;
@@ -147,5 +147,5 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
       }
     },
   };
-  return [vscode.lm.registerTool<FlowToolInput>('nexo_flow', tool)];
+  return [vscode.lm.registerTool<FlowToolInput>('traza_flow', tool)];
 }

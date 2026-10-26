@@ -22,10 +22,10 @@ export interface FlowPayload {
   mode?: 'walk' | 'sim' | 'logs' | 'db' | 'changes';
 }
 
-function nexoConfig(): { language: NexoLanguage; modelName: string | null; theme: NexoTheme } {
-  const config = vscode.workspace.getConfiguration('nexo');
+function viewConfig(): { language: NexoLanguage; modelName: string | null; theme: NexoTheme } {
+  const config = vscode.workspace.getConfiguration('traza');
   const language = config.get<string>('language') === 'en' ? 'en' : 'es';
-  const theme: NexoTheme = config.get<string>('theme') === 'vscode' ? 'vscode' : 'nexo';
+  const theme: NexoTheme = config.get<string>('theme') === 'vscode' ? 'vscode' : 'traza';
   const raw = config.get<unknown>('model');
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const pick = (key: string): string | null => (typeof o[key] === 'string' && (o[key] as string).trim() ? (o[key] as string).trim().slice(0, 120) : null);
@@ -72,7 +72,7 @@ export class FlowPanel {
       return;
     }
     const distUri = vscode.Uri.joinPath(context.extensionUri, ...WEBVIEW_DIST);
-    const panel = vscode.window.createWebviewPanel('nexoFlow', title, vscode.ViewColumn.Beside, {
+    const panel = vscode.window.createWebviewPanel('trazaFlow', title, vscode.ViewColumn.Beside, {
       enableScripts: true,
       retainContextWhenHidden: true,
       localResourceRoots: [distUri],
@@ -129,8 +129,8 @@ export class FlowPanel {
       vscode.workspace.onDidChangeWorkspaceFolders(filesChanged),
       vscode.workspace.onDidSaveTextDocument(() => this.post({ type: 'fileSaved' })),
       vscode.workspace.onDidChangeConfiguration((event) => {
-        if (event.affectsConfiguration('nexo.databases')) this.db.clearCache();
-        if (event.affectsConfiguration('nexo')) this.post({ type: 'config', ...nexoConfig() });
+        if (event.affectsConfiguration('traza.databases')) this.db.clearCache();
+        if (event.affectsConfiguration('traza')) this.post({ type: 'config', ...viewConfig() });
       }),
     );
     void this.loadHtml();
@@ -147,7 +147,7 @@ export class FlowPanel {
       return;
     }
     void this.panel.webview.postMessage(message).then(undefined, (error: unknown) => {
-      console.warn('[Nexo] No se pudo enviar el mensaje a la webview.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo enviar el mensaje a la webview.', error instanceof Error ? error.name : '');
     });
   }
 
@@ -167,7 +167,7 @@ export class FlowPanel {
       const bytes = await vscode.workspace.fs.readFile(vscode.Uri.joinPath(this.distUri, 'index.html'));
       html = new TextDecoder('utf-8').decode(bytes);
     } catch (error: unknown) {
-      console.warn('[Nexo] No se encontró el build de la webview.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se encontró el build de la webview.', error instanceof Error ? error.name : '');
       const csp = `default-src 'none'; style-src 'unsafe-inline';`;
       html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"></head>`
         + `<body style="font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px;">`
@@ -198,7 +198,7 @@ export class FlowPanel {
     switch (message.type) {
       case 'ready':
         this.ready = true;
-        this.post({ type: 'init', ...nexoConfig() });
+        this.post({ type: 'init', ...viewConfig() });
         for (const queued of this.queue.splice(0)) this.post(queued);
         return;
       case 'request':
@@ -284,12 +284,12 @@ export class FlowPanel {
     try {
       await vscode.commands.executeCommand('workbench.action.chat.open', { query: text });
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo abrir el chat.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo abrir el chat.', error instanceof Error ? error.name : '');
       try {
         await vscode.env.clipboard.writeText(text);
         void vscode.window.showInformationMessage('No se pudo abrir el chat; la pregunta se ha copiado al portapapeles.');
       } catch (copyError: unknown) {
-        console.warn('[Nexo] No se pudo copiar la pregunta.', copyError instanceof Error ? copyError.name : '');
+        console.warn('[Traza] No se pudo copiar la pregunta.', copyError instanceof Error ? copyError.name : '');
         void vscode.window.showWarningMessage('No se pudo abrir el chat ni copiar la pregunta.');
       }
     }
@@ -309,7 +309,7 @@ export class FlowPanel {
       try {
         item?.dispose();
       } catch (error: unknown) {
-        console.warn('[Nexo] No se pudo liberar un recurso.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo liberar un recurso.', error instanceof Error ? error.name : '');
       }
     }
   }

@@ -677,7 +677,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       this.assignViews(views);
     } catch (error: unknown) {
       if (run !== this.viewportRun) return;
-      console.warn('[Nexo IA] No se pudo cambiar el tamaño de la vista.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo cambiar el tamaño de la vista.', error instanceof Error ? error.name : '');
       this.viewport = previous;
       this.bridge.setUiState(VIEWPORT_STATE_KEY, previous);
     } finally {
@@ -759,7 +759,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         }
       }
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo localizar el componente de la pantalla.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo localizar el componente de la pantalla.', error instanceof Error ? error.name : '');
     }
   }
 
@@ -832,8 +832,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         plan = sanitizeUiPreviewPlan(outcome.plan);
         const tokensIn = Math.round(build.contextJson.length / 4);
         const tokensOut = plan ? Math.round(JSON.stringify(plan).length / 4) : 0;
-        console.info(`[Nexo IA] Vista de pantalla: tokens entrada≈${tokensIn} salida≈${tokensOut}`);
-        if (tokensIn > SOFT_TOKENS) console.warn(`[Nexo IA] Vista de pantalla: la entrada supera ${SOFT_TOKENS} tokens (≈${tokensIn}).`);
+        console.info(`[Traza] Vista de pantalla: tokens entrada≈${tokensIn} salida≈${tokensOut}`);
+        if (tokensIn > SOFT_TOKENS) console.warn(`[Traza] Vista de pantalla: la entrada supera ${SOFT_TOKENS} tokens (≈${tokensIn}).`);
         if (!plan) throw new ScreenError(this.i18n.t('aiFlow.screen.failed'));
         remember(this.planCache, build.planKey, plan);
       }
@@ -851,7 +851,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       this.changed$.next();
     } catch (error: unknown) {
       if (run !== this.loadRun) return;
-      if (!(error instanceof ScreenError)) console.warn('[Nexo IA] Vista de pantalla no disponible.', error instanceof Error ? error.name : '');
+      if (!(error instanceof ScreenError)) console.warn('[Traza] Vista de pantalla no disponible.', error instanceof Error ? error.name : '');
       this.status = 'error';
       this.errorText = error instanceof ScreenError ? error.message : this.i18n.t('aiFlow.screen.failed');
       this.changed$.next();
@@ -882,7 +882,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       try {
         methods = tsMethods(tsStripped);
       } catch (error: unknown) {
-        console.warn('[Nexo IA] No se pudieron leer los métodos del componente.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudieron leer los métodos del componente.', error instanceof Error ? error.name : '');
         methods = [];
       }
       terms = this.screenTerms(flow.steps, ctx.anchor, methods, tsStripped);
@@ -934,7 +934,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       try {
         raw = JSON.stringify(ctx.input) ?? '';
       } catch (error: unknown) {
-        console.warn('[Nexo IA] Datos de entrada no serializables.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] Datos de entrada no serializables.', error instanceof Error ? error.name : '');
       }
       simulation.input = raw.slice(0, 8000);
       if (JSON.stringify(simulation).length > LIMIT_SIMULATION) simulation.input = null;
@@ -957,7 +957,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       try {
         text = cutCss(trimGlobalCss(c.text, used), COMPONENT_CSS_AI_CHARS);
       } catch (error: unknown) {
-        console.warn('[Nexo IA] No se pudo recortar el CSS del componente.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo recortar el CSS del componente.', error instanceof Error ? error.name : '');
         text = cutCss(c.text, COMPONENT_CSS_AI_CHARS);
       }
       if (text !== c.text) env.approximate = true;
@@ -968,7 +968,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         const hints = new Set<string>([...used, ...(viewHtml.match(/[A-Za-z_$][\w$]*/g) ?? []), ...terms.secondary]);
         tsText = focusTsForAi(tsStripped, methods, [...terms.primary, ...terms.callees, ...terms.callers], hints, TS_TRUNCATE);
       } catch (error: unknown) {
-        console.warn('[Nexo IA] No se pudo enfocar el TS del componente.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo enfocar el TS del componente.', error instanceof Error ? error.name : '');
         tsText = tsStripped.slice(0, TS_TRUNCATE);
       }
       env.approximate = true;
@@ -1057,7 +1057,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         }
       }
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudieron relacionar los métodos de los pasos.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron relacionar los métodos de los pasos.', error instanceof Error ? error.name : '');
     }
     // Términos secundarios: campos que mutan los métodos de los pasos y campos del TS nombrados en el paso ancla.
     try {
@@ -1101,7 +1101,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         }
       }
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudieron calcular los términos secundarios.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron calcular los términos secundarios.', error instanceof Error ? error.name : '');
       secondary.length = 0;
     }
     return { primary, callers, callees, secondary };
@@ -1241,7 +1241,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       info = parseRouting(texts);
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudieron leer las rutas.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron leer las rutas.', error instanceof Error ? error.name : '');
     }
     this.routeInfoCache.set(env.prefix, info);
     return info;
@@ -1388,7 +1388,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         }
       }
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo reunir el contexto de la pantalla.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo reunir el contexto de la pantalla.', error instanceof Error ? error.name : '');
       return [];
     }
     return wrappers;
@@ -1636,7 +1636,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         doc = r.doc;
         applied = k + 1;
       } catch (error: unknown) {
-        console.warn('[Nexo IA] No se pudo montar el componente en su contexto.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] No se pudo montar el componente en su contexto.', error instanceof Error ? error.name : '');
         approximate = true;
         break;
       }
@@ -1783,7 +1783,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       return { width: W, height, viewportHeight: H, crop, ...(contain ? { contain: true } : {}) };
     } catch (error: unknown) {
-      console.warn('[Nexo IA] No se pudo medir la vista de pantalla.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo medir la vista de pantalla.', error instanceof Error ? error.name : '');
       return fallback;
     } finally {
       iframe.remove();
@@ -1936,7 +1936,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       }
       env.angular = { styles, assets };
     } catch (error: unknown) {
-      console.warn('[Nexo IA] angular.json no válido.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] angular.json no válido.', error instanceof Error ? error.name : '');
       env.angular = null;
     }
     return env.angular;
@@ -2124,7 +2124,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     try {
       clean = decodeURIComponent(clean);
     } catch (error: unknown) {
-      console.warn('[Nexo IA] Ruta de asset mal codificada.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] Ruta de asset mal codificada.', error instanceof Error ? error.name : '');
     }
     clean = normPath(clean).replace(/^\/+/, '');
     if (!clean) return null;
@@ -2210,7 +2210,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       return !SVG_UNSAFE.test(new TextDecoder().decode(bytes));
     } catch (error: unknown) {
-      console.warn('[Nexo IA] SVG no legible.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] SVG no legible.', error instanceof Error ? error.name : '');
       return false;
     }
   }

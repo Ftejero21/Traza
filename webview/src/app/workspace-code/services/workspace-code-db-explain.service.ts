@@ -61,7 +61,7 @@ export class WorkspaceCodeDbExplainService {
     try {
       return (await this.hintsFor(key, table)).endpoint;
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudo buscar el endpoint de la tabla.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudo buscar el endpoint de la tabla.', error instanceof Error ? error.name : '');
       return null;
     }
   }
@@ -80,7 +80,7 @@ export class WorkspaceCodeDbExplainService {
     try {
       hints = (await this.hintsFor(key, table)).hints;
     } catch (error: unknown) {
-      console.warn('[Nexo] No se pudieron reunir las pistas de código.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron reunir las pistas de código.', error instanceof Error ? error.name : '');
       hints = [];
     }
     const context = this.context(meta.provider, target, meta.tables, hints, base);
@@ -147,7 +147,7 @@ export class WorkspaceCodeDbExplainService {
     const cached = this.hintCache.get(cacheKey);
     if (cached && Date.now() - cached.at < HINTS_TTL_MS) return cached.promise;
     const promise = this.collectHints(table).catch((error: unknown): CodeHints => {
-      console.warn('[Nexo] No se pudieron reunir las pistas de código.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] No se pudieron reunir las pistas de código.', error instanceof Error ? error.name : '');
       return { hints: [], endpoint: null };
     });
     this.hintCache.set(cacheKey, { at: Date.now(), promise });
@@ -222,7 +222,7 @@ export class WorkspaceCodeDbExplainService {
           if (content !== null) contents.set(file, content);
         } catch (error: unknown) {
           // Un archivo que no se puede leer simplemente no aporta pistas.
-          console.warn('[Nexo] No se pudo leer un archivo para las pistas.', error instanceof Error ? error.name : '');
+          console.warn('[Traza] No se pudo leer un archivo para las pistas.', error instanceof Error ? error.name : '');
         }
       }
     };

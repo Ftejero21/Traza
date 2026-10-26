@@ -20,7 +20,7 @@ function loadSass(): Promise<SassModule | null> {
         return typeof mod.compileStringAsync === 'function' ? mod : null;
       })
       .catch((error: unknown) => {
-        console.warn('[Nexo IA] Compilador SCSS no disponible; se usa el transpilador ligero.', error instanceof Error ? error.name : '');
+        console.warn('[Traza] Compilador SCSS no disponible; se usa el transpilador ligero.', error instanceof Error ? error.name : '');
         return null;
       });
   }
@@ -56,7 +56,7 @@ export async function compileScss(text: string, path: string, loader: ScssImport
     const hit = cache.get(key);
     if (hit) return hit;
   } catch (error: unknown) {
-    console.warn('[Nexo IA] Hash SCSS no disponible.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] Hash SCSS no disponible.', error instanceof Error ? error.name : '');
   }
   const fallback = async (): Promise<{ css: string; approximate: boolean }> => {
     const r = await scssFallback(source, path, loader);
@@ -110,7 +110,7 @@ export async function compileScss(text: string, path: string, loader: ScssImport
     if (key) remember(key, r);
     return r;
   } catch (error: unknown) {
-    console.warn('[Nexo IA] SCSS no compilado; se usa el transpilador ligero.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] SCSS no compilado; se usa el transpilador ligero.', error instanceof Error ? error.name : '');
     const r = await fallback();
     if (key) remember(key, r);
     return r;

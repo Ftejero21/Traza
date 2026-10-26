@@ -1420,7 +1420,7 @@ export function encapsulateCss(css: string, id: string): { css: string; approxim
   try {
     return { css: encapsulateBlocks(text, id), approximate: false };
   } catch (error: unknown) {
-    console.warn('[Nexo IA] CSS sin encapsular.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] CSS sin encapsular.', error instanceof Error ? error.name : '');
     return { css: text, approximate: true };
   }
 }
@@ -1518,7 +1518,7 @@ export function replaceCanvasPlaceholders(doc: Document, label: string): void {
       div.appendChild(span);
       canvas.replaceWith(div);
     } catch (error: unknown) {
-      console.warn('[Nexo IA] Gráfico sin placeholder.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] Gráfico sin placeholder.', error instanceof Error ? error.name : '');
     }
   }
 }

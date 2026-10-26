@@ -2,7 +2,7 @@ import { CodeRef, FlowDiagram } from '../workspace-code/ai/nexo-ia.types';
 
 /**
  * Proyecto de ejemplo (login de FreeSocial) con archivos virtuales: alineado con los logs de
- * `sample-logs.ts`. Lo usan el modo navegador y el comando «Nexo: Abrir flujo de ejemplo».
+ * `sample-logs.ts`. Lo usan el modo navegador y el comando «Traza: Abrir flujo de ejemplo».
  */
 
 const LOGIN_TS = `import { Component } from '@angular/core';
@@ -223,9 +223,9 @@ export const SAMPLE_FILES: Record<string, string> = {
 /** Línea 1-based de la primera línea cuyo `trim()` contiene `anchor`. Falla si no existe (garantiza las anclas). */
 export function lineOf(path: string, anchor: string): number {
   const content = SAMPLE_FILES[path];
-  if (content === undefined) throw new Error(`[Nexo] Archivo de ejemplo inexistente: ${path}`);
+  if (content === undefined) throw new Error(`[Traza] Archivo de ejemplo inexistente: ${path}`);
   const index = content.split('\n').findIndex((line) => line.trim().includes(anchor));
-  if (index < 0) throw new Error(`[Nexo] Ancla de ejemplo no encontrada en ${path}: ${anchor}`);
+  if (index < 0) throw new Error(`[Traza] Ancla de ejemplo no encontrada en ${path}: ${anchor}`);
   return index + 1;
 }
 

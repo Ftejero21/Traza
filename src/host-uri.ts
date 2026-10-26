@@ -6,9 +6,9 @@ import { isSpanish, oneLine } from './host-flow-summary';
 
 /**
  * Deep links:
- * - `vscode://nexo-local.nexo-vscode/flow?q=…&mode=sim|logs|db`: genera un flujo. La URI es entrada no confiable:
+ * - `vscode://ftejero21.traza/flow?q=…&mode=sim|logs|db`: genera un flujo. La URI es entrada no confiable:
  *   siempre pide confirmación modal antes de enviar nada al modelo.
- * - `vscode://nexo-local.nexo-vscode/show?id=<uuid>`: reabre un flujo ya generado en esta sesión (caché en memoria).
+ * - `vscode://ftejero21.traza/show?id=<uuid>`: reabre un flujo ya generado en esta sesión (caché en memoria).
  *   Sin IA, sin enviar datos y sin modal; el id se valida y solo se busca en la caché.
  */
 
@@ -59,30 +59,31 @@ async function handleFlowUri(context: vscode.ExtensionContext, ai: HostAi, uri: 
       const id = parseShowUri(uri);
       if (!id) {
         void vscode.window.showErrorMessage(es
-          ? 'El enlace de Nexo no trae un identificador de flujo válido (parámetro id).'
-          : 'The Nexo link has no valid flow identifier (id parameter).');
+          ? 'El enlace de Traza no trae un identificador de flujo válido (parámetro id).'
+          : 'The Traza link has no valid flow identifier (id parameter).');
         return;
       }
-      await vscode.commands.executeCommand('nexo.showFlow', { flowId: id });
+      await vscode.commands.executeCommand('traza.showFlow', { flowId: id });
       return;
     }
     if (busy) {
       void vscode.window.showInformationMessage(es
-        ? 'Nexo ya está generando un flujo desde un enlace. Espera a que termine.'
-        : 'Nexo is already generating a flow from a link. Wait for it to finish.');
+        ? 'Traza ya está generando un flujo desde un enlace. Espera a que termine.'
+        : 'Traza is already generating a flow from a link. Wait for it to finish.');
       return;
     }
     const parsed = parseFlowUri(uri);
     if (parsed === 'badPath') {
+      const base = `${vscode.env.uriScheme}://${context.extension.id}`;
       void vscode.window.showErrorMessage(es
-        ? 'Enlace de Nexo no reconocido. Usa vscode://nexo-local.nexo-vscode/flow?q=<pregunta>.'
-        : 'Unrecognized Nexo link. Use vscode://nexo-local.nexo-vscode/flow?q=<question>.');
+        ? `Enlace de Traza no reconocido. Usa ${base}/flow?q=<pregunta>.`
+        : `Unrecognized Traza link. Use ${base}/flow?q=<question>.`);
       return;
     }
     if (parsed === 'badQuestion') {
       void vscode.window.showErrorMessage(es
-        ? 'El enlace de Nexo no trae una pregunta válida (parámetro q, de 1 a 4000 caracteres).'
-        : 'The Nexo link has no valid question (q parameter, 1 to 4000 characters).');
+        ? 'El enlace de Traza no trae una pregunta válida (parámetro q, de 1 a 4000 caracteres).'
+        : 'The Traza link has no valid question (q parameter, 1 to 4000 characters).');
       return;
     }
     if (!(vscode.workspace.workspaceFolders ?? []).length) {
@@ -96,15 +97,15 @@ async function handleFlowUri(context: vscode.ExtensionContext, ai: HostAi, uri: 
       const { question, mode } = parsed;
       const preview = previewQuestion(question);
       const folders = folderLabel();
-      const message = es ? 'Un enlace quiere generar un flujo con Nexo' : 'A link wants to generate a flow with Nexo';
+      const message = es ? 'Un enlace quiere generar un flujo con Traza' : 'A link wants to generate a flow with Traza';
       const button = es ? 'Generar flujo' : 'Generate flow';
       const detail = es
-        ? `Pregunta: ${preview}\n\nCarpeta: ${folders}\n\nNexo enviará al proveedor del modelo configurado en Nexo las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). No se modificará ningún archivo. Si no esperabas este enlace, cancela.`
-        : `Question: ${preview}\n\nFolder: ${folders}\n\nNexo will send the relevant workspace paths and code fragments to the provider of the model configured in Nexo (never sensitive files such as .env or keys, and with secrets masked). No file will be modified. If you did not expect this link, cancel.`;
+        ? `Pregunta: ${preview}\n\nCarpeta: ${folders}\n\nTraza enviará al proveedor del modelo configurado en Traza las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). No se modificará ningún archivo. Si no esperabas este enlace, cancela.`
+        : `Question: ${preview}\n\nFolder: ${folders}\n\nTraza will send the relevant workspace paths and code fragments to the provider of the model configured in Traza (never sensitive files such as .env or keys, and with secrets masked). No file will be modified. If you did not expect this link, cancel.`;
       const choice = await vscode.window.showInformationMessage(message, { modal: true, detail }, button);
       if (choice !== button) return;
       const generated = await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: es ? 'Nexo: generando flujo' : 'Nexo: generating flow', cancellable: true },
+        { location: vscode.ProgressLocation.Notification, title: es ? 'Traza: generando flujo' : 'Traza: generating flow', cancellable: true },
         (progress, token) => ai.generateFlow({ question, pinned: [], useActiveEditor: false, token, progress: (m) => progress.report({ message: m }) }),
       );
       FlowPanel.show(context, ai, {
@@ -116,7 +117,7 @@ async function handleFlowUri(context: vscode.ExtensionContext, ai: HostAi, uri: 
     }
   } catch (error: unknown) {
     if (isCancelled(error)) return;
-    console.warn('[Nexo] No se pudo generar el flujo desde un enlace.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] No se pudo generar el flujo desde un enlace.', error instanceof Error ? error.name : '');
     void vscode.window.showErrorMessage(
       error instanceof Error && error.message ? error.message.slice(0, 500) : (es ? 'Error inesperado.' : 'Unexpected error.'),
     );

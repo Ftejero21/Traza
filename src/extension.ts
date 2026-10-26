@@ -3,6 +3,7 @@ import { FlowPanel } from './flow-panel';
 import { HostAi, isCancelled, type GeneratedFlow } from './host-ai';
 import { registerChatParticipant } from './host-chat';
 import { registerDbCommands } from './host-db';
+import { migrateLegacySettings } from './host-migration';
 import { registerFlowTool } from './host-tool';
 import { registerFlowUriHandler } from './host-uri';
 
@@ -36,7 +37,7 @@ function parseFlowJson(text: string): { flow: unknown; proposals: unknown[] } | 
   try {
     raw = JSON.parse(text);
   } catch (error: unknown) {
-    console.warn('[Nexo] JSON no válido.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] JSON no válido.', error instanceof Error ? error.name : '');
     void vscode.window.showErrorMessage(`El JSON no es válido: ${error instanceof Error ? error.message.slice(0, 200) : ''}`);
     return null;
   }
@@ -71,7 +72,7 @@ async function readJsonFile(): Promise<string | null> {
     }
     return new TextDecoder('utf-8').decode(await vscode.workspace.fs.readFile(uri));
   } catch (error: unknown) {
-    console.warn('[Nexo] No se pudo leer el archivo JSON.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] No se pudo leer el archivo JSON.', error instanceof Error ? error.name : '');
     void vscode.window.showErrorMessage('No se pudo leer el archivo JSON.');
     return null;
   }
@@ -84,7 +85,7 @@ async function openFlow(context: vscode.ExtensionContext, ai: HostAi): Promise<v
     ...(editor?.document.languageId === 'json' ? [{ label: '$(edit) Usar JSON del editor activo', description: editor.document.fileName, source: 'editor' as const }] : []),
     { label: '$(beaker) Flujo de ejemplo', source: 'sample' },
   ];
-  const choice = await vscode.window.showQuickPick(items, { placeHolder: 'Nexo: ¿qué flujo quieres abrir?' });
+  const choice = await vscode.window.showQuickPick(items, { placeHolder: 'Traza: ¿qué flujo quieres abrir?' });
   if (!choice) return;
   if (choice.source === 'sample') {
     FlowPanel.show(context, ai, { flow: null, sample: true, title: SAMPLE_TITLE, proposals: [] });
@@ -109,7 +110,7 @@ async function askQuestion(title: string, prompt: string): Promise<string | null
 
 function showError(error: unknown): void {
   if (isCancelled(error)) return;
-  console.warn('[Nexo] La operación de IA ha fallado.', error instanceof Error ? error.name : '');
+  console.warn('[Traza] La operación de IA ha fallado.', error instanceof Error ? error.name : '');
   void vscode.window.showErrorMessage(error instanceof Error && error.message ? error.message.slice(0, 500) : 'Error inesperado.');
 }
 
@@ -119,9 +120,9 @@ function showGenerated(context: vscode.ExtensionContext, ai: HostAi, generated: 
   FlowPanel.showGenerated(context, ai, generated);
 }
 
-/** «Nexo: Visualizar flujo» (`{ flowId }`): reabre un flujo de la sesión, o el último generado sin argumento. Sin IA. */
+/** «Traza: Visualizar flujo» (`{ flowId }`): reabre un flujo de la sesión, o el último generado sin argumento. Sin IA. */
 function showFlow(context: vscode.ExtensionContext, ai: HostAi, arg?: unknown): void {
-  const es = (vscode.workspace.getConfiguration('nexo').get<string>('language') ?? 'es') !== 'en';
+  const es = (vscode.workspace.getConfiguration('traza').get<string>('language') ?? 'es') !== 'en';
   const raw = arg && typeof arg === 'object' && !Array.isArray(arg) ? (arg as { flowId?: unknown }).flowId : undefined;
   let generated: GeneratedFlow | null;
   if (arg === undefined || arg === null) generated = ai.lastGenerated;
@@ -131,21 +132,21 @@ function showFlow(context: vscode.ExtensionContext, ai: HostAi, arg?: unknown): 
     return;
   }
   void vscode.window.showInformationMessage(arg === undefined || arg === null
-    ? (es ? 'Todavía no se ha generado ningún flujo. Usa «Nexo: Generar flujo».' : 'No flow has been generated yet. Use "Nexo: Generar flujo".')
+    ? (es ? 'Todavía no se ha generado ningún flujo. Usa «Traza: Generar flujo».' : 'No flow has been generated yet. Use "Traza: Generar flujo".')
     : (es ? 'No se encontró ese flujo en esta sesión; vuelve a generarlo.' : 'That flow was not found in this session; generate it again.'));
 }
 
-/** «Nexo: Generar flujo»: pregunta, archivo activo y selección como pista, y abre el panel. */
+/** «Traza: Generar flujo»: pregunta, archivo activo y selección como pista, y abre el panel. */
 async function generateFlow(context: vscode.ExtensionContext, ai: HostAi): Promise<void> {
   if (!(vscode.workspace.workspaceFolders ?? []).length) {
     void vscode.window.showErrorMessage('Abre una carpeta del proyecto para generar el flujo.');
     return;
   }
-  const question = await askQuestion('Nexo: Generar flujo', '¿Qué proceso quieres ver? (p. ej. «¿Cómo funciona el login?»)');
+  const question = await askQuestion('Traza: Generar flujo', '¿Qué proceso quieres ver? (p. ej. «¿Cómo funciona el login?»)');
   if (!question) return;
   try {
     const generated = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Nexo: generando flujo', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'Traza: generando flujo', cancellable: true },
       (progress, token) => ai.generateFlow({ question, pinned: [], useActiveEditor: true, token, progress: (message) => progress.report({ message }) }),
     );
     showGenerated(context, ai, generated);
@@ -154,18 +155,18 @@ async function generateFlow(context: vscode.ExtensionContext, ai: HostAi): Promi
   }
 }
 
-/** «Nexo: Proponer cambio»: sobre el flujo abierto (no el de ejemplo); la propuesta se añade a «Simular cambios». */
+/** «Traza: Proponer cambio»: sobre el flujo abierto (no el de ejemplo); la propuesta se añade a «Simular cambios». */
 async function proposeChange(ai: HostAi): Promise<void> {
   const current = FlowPanel.currentFlow();
   if (!current) {
     void vscode.window.showWarningMessage('Abre o genera un flujo (que no sea el de ejemplo) antes de proponer un cambio.');
     return;
   }
-  const question = await askQuestion('Nexo: Proponer cambio', '¿Qué cambio quieres en este flujo?');
+  const question = await askQuestion('Traza: Proponer cambio', '¿Qué cambio quieres en este flujo?');
   if (!question) return;
   try {
     const result = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: 'Nexo: proponiendo cambio', cancellable: true },
+      { location: vscode.ProgressLocation.Notification, title: 'Traza: proponiendo cambio', cancellable: true },
       (progress, token) => ai.proposeChange({ question, flow: current.flow, token, progress: (message) => progress.report({ message }) }),
     );
     if ('answer' in result) {
@@ -179,23 +180,20 @@ async function proposeChange(ai: HostAi): Promise<void> {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  void migrateLegacySettings(context);
   const ai = new HostAi(context);
-  // El token del backend antiguo ya no se usa.
-  void Promise.resolve(context.secrets.delete('nexo.token')).catch((error: unknown) => {
-    console.warn('[Nexo] No se pudo borrar el token antiguo.', error instanceof Error ? error.name : '');
-  });
   context.subscriptions.push(
-    vscode.commands.registerCommand('nexo.openFlow', () => openFlow(context, ai)),
-    vscode.commands.registerCommand('nexo.openSampleFlow', () => FlowPanel.show(context, ai, { flow: null, sample: true, title: SAMPLE_TITLE, proposals: [] })),
-    vscode.commands.registerCommand('nexo.generateFlow', () => generateFlow(context, ai)),
-    vscode.commands.registerCommand('nexo.proposeChange', () => proposeChange(ai)),
-    vscode.commands.registerCommand('nexo.selectModel', () => ai.selectModelCommand()),
-    vscode.commands.registerCommand('nexo.showLastFlow', () => {
+    vscode.commands.registerCommand('traza.openFlow', () => openFlow(context, ai)),
+    vscode.commands.registerCommand('traza.openSampleFlow', () => FlowPanel.show(context, ai, { flow: null, sample: true, title: SAMPLE_TITLE, proposals: [] })),
+    vscode.commands.registerCommand('traza.generateFlow', () => generateFlow(context, ai)),
+    vscode.commands.registerCommand('traza.proposeChange', () => proposeChange(ai)),
+    vscode.commands.registerCommand('traza.selectModel', () => ai.selectModelCommand()),
+    vscode.commands.registerCommand('traza.showLastFlow', () => {
       const last = ai.lastGenerated;
       if (last) showGenerated(context, ai, last);
-      else void vscode.window.showInformationMessage('Todavía no se ha generado ningún flujo. Usa «Nexo: Generar flujo».');
+      else void vscode.window.showInformationMessage('Todavía no se ha generado ningún flujo. Usa «Traza: Generar flujo».');
     }),
-    vscode.commands.registerCommand('nexo.showFlow', (arg?: unknown) => showFlow(context, ai, arg)),
+    vscode.commands.registerCommand('traza.showFlow', (arg?: unknown) => showFlow(context, ai, arg)),
     ...registerChatParticipant(context, ai),
     ...registerFlowTool(context, ai),
     registerFlowUriHandler(context, ai),

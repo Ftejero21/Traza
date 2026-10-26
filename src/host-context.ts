@@ -263,7 +263,7 @@ async function readText(file: ProjectFileInfo, maxBytes: number): Promise<string
     if (!read.ok || read.binary) return null;
     return read.content.length > maxBytes ? null : read.content;
   } catch (error: unknown) {
-    console.warn('[Nexo] No se pudo leer un archivo del contexto.', error instanceof Error ? error.name : '');
+    console.warn('[Traza] No se pudo leer un archivo del contexto.', error instanceof Error ? error.name : '');
     return null;
   }
 }
@@ -453,7 +453,7 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
       for (const path of picked.filter((p) => byPath.has(p)).slice(0, MAX_SELECTED)) pushPath(path);
     } catch (error: unknown) {
       if (error instanceof Error && error.message === 'cancelled') throw error;
-      console.warn('[Nexo] Selección de archivos con IA no disponible.', error instanceof Error ? error.name : '');
+      console.warn('[Traza] Selección de archivos con IA no disponible.', error instanceof Error ? error.name : '');
     }
   }
   for (const { file, score } of ranked.slice(0, KEYWORD_TOP)) if (score > 0) pushPath(file.path);
