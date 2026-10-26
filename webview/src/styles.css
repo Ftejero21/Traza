@@ -1,8 +1,114 @@
 /*
- * Tema de la vista de flujo: las variables `--wce-*` del editor de chatFront se mapean a los tokens del tema activo de
- * VS Code (`--vscode-*`). Fuera de VS Code (navegador) se usan los valores originales del tema Nexo Oscuro.
+ * Tema de la vista de flujo (`nexo.theme`, el host lo envía en `init`/`config` y la webview lo refleja en
+ * `html[data-nexo-theme]`). Por defecto `nexo`: paleta y fuentes originales de Nexo (chatFront), oscura o clara según
+ * las clases `vscode-light` / `vscode-high-contrast-light` que VS Code pone en el `body`. Con `vscode`, las variables
+ * `--wce-*` del editor de chatFront se mapean a los tokens del tema activo de VS Code (`--vscode-*`). Fuera de VS Code
+ * (navegador) se usa Nexo Oscuro. Sin fuentes remotas: pilas con fallback del sistema.
  */
-:root {
+body {
+  color-scheme: dark;
+  --wce-fs: 1;
+  --wce-pad: 1;
+  --wce-font: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --wce-font-title: 'Plus Jakarta Sans', 'Inter', system-ui, sans-serif;
+  --wce-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  --wce-bg:#0d1220;
+  --wce-editor-bg:#0d1220;
+  --wce-surface:#10162a;
+  --wce-surface-2:#151c33;
+  --wce-input:#0a0e18;
+  --wce-border:#94a3d81c;
+  --wce-border-strong:#929fcd55;
+  --wce-hover:#94a3d817;
+  --wce-hover-strong:#e6e9f529;
+  --wce-raised:#e6e9f509;
+  --wce-text:#e6e9f5;
+  --wce-text-strong:#f5f6fb;
+  --wce-text-soft:#bdc2d5;
+  --wce-muted:#8b93ad;
+  --wce-faint:#5f667c;
+  --wce-scroll:#8b93ad52;
+  --wce-accent:#6366f1;
+  --wce-accent-2:#a855f7;
+  --wce-accent-text:#a9abf7;
+  --wce-accent-soft:#6366f133;
+  --wce-accent-strong:#6366f16b;
+  --wce-on-accent:#ffffff;
+  --wce-danger:#f87171;
+  --wce-danger-soft:#f871712e;
+  --wce-danger-text:#fca5a5;
+  --wce-danger-border:#f8717173;
+  --wce-success:#4ade80;
+  --wce-success-soft:#4ade8033;
+  --wce-success-text:#86efac;
+  --wce-success-border:#4ade8066;
+  --wce-warning:#fbbf24;
+  --wce-warning-text:#fde68a;
+  --wce-warning-soft:#fbbf242e;
+  --wce-warning-border:#fbbf2466;
+  --wce-accent-2-soft:#a855f738;
+  --wce-syn-keyword:#c4b5fd;
+  --wce-syn-string:#86efac;
+  --wce-syn-type:#7dd3fc;
+  --wce-syn-function:#fbbf24;
+  --wce-syn-number:#fdba74;
+  --wce-syn-comment:#6b7696;
+  --wce-overlay:rgba(5,8,16,0.62);
+  --wce-shadow:rgba(0,0,0,0.55);
+  --wce-gradient:linear-gradient(90deg,#6366f1,#a855f7,#ec4899,#f97316);
+}
+
+body.vscode-light,
+body.vscode-high-contrast-light {
+  color-scheme: light;
+  --wce-bg:#f4f6fb;
+  --wce-editor-bg:#ffffff;
+  --wce-surface:#eef1f8;
+  --wce-surface-2:#ffffff;
+  --wce-input:#fbfbfd;
+  --wce-border:#1e293b1f;
+  --wce-border-strong:#2d384c57;
+  --wce-hover:#6366f114;
+  --wce-hover-strong:#1e23361a;
+  --wce-raised:#1e233609;
+  --wce-text:#1e2336;
+  --wce-text-strong:#0f121b;
+  --wce-text-soft:#394056;
+  --wce-muted:#5b647e;
+  --wce-faint:#9197aa;
+  --wce-scroll:#5b647e52;
+  --wce-accent:#6366f1;
+  --wce-accent-2:#7c3aed;
+  --wce-accent-text:#5457cd;
+  --wce-accent-soft:#6366f11f;
+  --wce-accent-strong:#6366f14d;
+  --wce-on-accent:#ffffff;
+  --wce-danger:#dc2626;
+  --wce-danger-soft:#dc26261a;
+  --wce-danger-text:#b91c1c;
+  --wce-danger-border:#dc262673;
+  --wce-success:#16a34a;
+  --wce-success-soft:#16a34a1f;
+  --wce-success-text:#15803d;
+  --wce-success-border:#16a34a66;
+  --wce-warning:#b45309;
+  --wce-warning-text:#92400e;
+  --wce-warning-soft:#b453091f;
+  --wce-warning-border:#b4530966;
+  --wce-accent-2-soft:#7c3aed38;
+  --wce-syn-keyword:#7c3aed;
+  --wce-syn-string:#15803d;
+  --wce-syn-type:#0369a1;
+  --wce-syn-function:#a16207;
+  --wce-syn-number:#c2410c;
+  --wce-syn-comment:#7c8597;
+  --wce-overlay:rgba(15,23,42,0.32);
+  --wce-shadow:rgba(15,23,42,0.18);
+  --wce-gradient:linear-gradient(90deg,#6366f1,#7c3aed,#ec4899,#f97316);
+}
+
+html[data-nexo-theme='vscode'] body {
+  color-scheme: normal;
   --wce-bg: var(--vscode-editor-background, #0d1220);
   --wce-editor-bg: var(--vscode-editor-background, #0d1220);
   --wce-surface: var(--vscode-sideBar-background, #10162a);
@@ -45,8 +151,11 @@
   --wce-syn-function: var(--vscode-symbolIcon-functionForeground, #82aaff);
   --wce-syn-number: var(--vscode-debugTokenExpression-number, #f78c6c);
   --wce-syn-comment: var(--vscode-disabledForeground, #5d6684);
+  --wce-font: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
+  --wce-font-title: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
   --wce-mono: var(--vscode-editor-font-family, monospace);
-  --wce-pad: 1;
+  --wce-accent-2-soft: color-mix(in srgb, var(--wce-accent-2) 22%, transparent);
+  --wce-gradient: linear-gradient(90deg, var(--wce-accent), var(--wce-accent-2));
 }
 
 *, *::before, *::after {
@@ -61,7 +170,7 @@ html, body {
 }
 
 body {
-  font-family: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
+  font-family: var(--wce-font);
   font-size: 13px;
   color: var(--wce-text);
   background: var(--wce-editor-bg);

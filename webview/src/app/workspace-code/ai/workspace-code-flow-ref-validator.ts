@@ -25,6 +25,9 @@ export interface ValidatedFlow {
 }
 
 const NEAR_WINDOW = 30;
+/** Fragmento del código de un método: líneas máximas y archivos candidatos máximos. */
+const METHOD_SNIPPET_MAX_LINES = 40;
+const METHOD_SNIPPET_MAX_FILES = 8;
 const MAX_TEXT_CHARS = 3 * 1024 * 1024;
 const NO_CLASS_LANGS = new Set(['html', 'htm', 'sql', 'xml', 'json', 'yml', 'yaml', 'properties']);
 /** Plantillas, estilos y datos: no tienen funciones, así que `functionName` («template», «styles»…) no se busca en el texto. */
@@ -103,7 +106,17 @@ export class FlowRefValidator {
     if (direct) return direct;
     const suffix = `/${rel}`;
     const matches = this.project.project.files.filter((f) => f.path.endsWith(suffix));
-    return matches.length === 1 ? matches[0] : null;
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return null;
+    // Prefijo incorrecto de la IA: se quitan segmentos iniciales hasta dar con un sufijo que identifique un único archivo.
+    const parts = rel.split('/').filter(Boolean);
+    for (let i = 1; i < parts.length; i++) {
+      const tail = parts.slice(i).join('/');
+      const hits = this.project.project.files.filter((f) => f.path === tail || f.path.endsWith(`/${tail}`));
+      if (hits.length === 1) return hits[0];
+      if (hits.length > 1) return null;
+    }
+    return null;
   }
 
   /** Archivo legible para Nexo IA (no sensible, no binario, permitido). */
@@ -421,8 +434,23 @@ export class FlowRefValidator {
       };
     }
     const length = Math.min(8, Math.max(3, snippet?.length ?? 5));
+    if (checked.lines && checked.lines.length) {
+      // Con el archivo legible se muestra siempre el fragmento real, también si la línea de la IA no se pudo verificar.
+      const total = checked.lines.length;
+      const line = Number.isFinite(r.line) ? Math.min(total, Math.max(1, Math.floor(r.line))) : 1;
+      const first = Math.max(1, Math.min(line - 2, total - length + 1));
+      return {
+        file: checked.file ? checked.file.path : r.file,
+        fileId: checked.file ? checked.file.id : null,
+        startLine: first,
+        lines: checked.lines.slice(first - 1, first - 1 + length),
+        highlightLine: line,
+        language: checked.file?.extension || snippet?.language || '',
+        verification: r.verification ?? 'unverified',
+      };
+    }
     const startLine = Math.max(1, r.line - 2);
-    const lines = checked.lines ? checked.lines.slice(startLine - 1, startLine - 1 + length) : [];
+    const lines: string[] = [];
     return {
       file: checked.file ? checked.file.path : r.file,
       fileId: checked.file && r.verification !== 'unverified' ? checked.file.id : null,
@@ -432,6 +460,76 @@ export class FlowRefValidator {
       language: checked.file?.extension || snippet?.language || '',
       verification: r.verification ?? 'unverified',
     };
+  }
+
+  /**
+   * Código de un método (`Clase.método`) releído de los archivos reales del proyecto: primero el archivo de `hint`
+   * (si encaja con la clase) y después los archivos cuyo nombre coincide con `className`. `null` si no se localiza.
+   * Los identificadores se validan antes de usarse en una expresión regular.
+   */
+  async methodSnippet(className: string, functionName: string, hint: CodeRef | null): Promise<SnippetView | null> {
+    const ident = /^[A-Za-z_$][\w$]*$/;
+    if (!ident.test(functionName) || (className !== '' && !ident.test(className))) return null;
+    const candidates: WorkspaceCodeFile[] = [];
+    const add = (f: WorkspaceCodeFile | null) => {
+      if (f && this.usable(f) && !candidates.includes(f) && candidates.length < METHOD_SNIPPET_MAX_FILES) candidates.push(f);
+    };
+    let hintFile: WorkspaceCodeFile | null = null;
+    if (hint && (className === '' || hint.className === className)) {
+      hintFile = this.resolveFile(hint);
+      if (this.usable(hintFile)) add(hintFile);
+      else hintFile = null;
+    }
+    if (className) {
+      const flat = (s: string) => s.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+      const wanted = flat(className);
+      for (const f of this.project.project.files) {
+        if (candidates.length >= METHOD_SNIPPET_MAX_FILES) break;
+        if (!this.usable(f)) continue;
+        const base = f.name.replace(/\.[^.]+$/, '');
+        if (base === className || flat(base) === wanted) add(f);
+      }
+    }
+    const call = new RegExp(`(^|[^.\\w$])${escapeRe(functionName)}\\s*(<[^>]*>)?\\s*\\(`);
+    const statement = /^\s*(return|await|if|else|while|for|switch|throw|new|yield)\b/;
+    for (const file of candidates) {
+      const lines = await this.linesOf(file);
+      if (!lines || !lines.length) continue;
+      const ext = file.extension.toLowerCase();
+      const bodies = this.functionBodies(lines, functionName, ext);
+      let range: [number, number] | null = null;
+      if (bodies.length) {
+        range = bodies[0];
+        if (bodies.length > 1 && hint && file === hintFile) {
+          range = bodies.reduce((best, b) => (Math.abs(b[0] - hint.line) < Math.abs(best[0] - hint.line) ? b : best), bodies[0]);
+        }
+      } else {
+        // Sin cuerpo (p. ej. método de una interfaz): la declaración con sus anotaciones, hasta `;` o `{`.
+        const at = lines.findIndex((l) => call.test(l) && !statement.test(l));
+        if (at < 0) continue;
+        let start = at;
+        while (start > 0 && at - start < 5 && /^\s*@/.test(lines[start - 1])) start--;
+        let end = at;
+        while (end < lines.length - 1 && end - start < 5 && !/[;{]\s*$/.test(lines[end])) end++;
+        range = [start + 1, end + 1];
+      }
+      const first = range[0];
+      const last = Math.min(range[1], first + METHOD_SNIPPET_MAX_LINES - 1, lines.length);
+      const shown = lines.slice(first - 1, last);
+      if (!shown.length) continue;
+      let decl = first;
+      while (decl < last && /^\s*@/.test(lines[decl - 1])) decl++;
+      return {
+        file: file.path,
+        fileId: file.id,
+        startLine: first,
+        lines: shown,
+        highlightLine: decl,
+        language: file.extension,
+        verification: 'exact',
+      };
+    }
+    return null;
   }
 
   /** Para pasos sql/http/generated: el código generado por la IA sustituye a la lectura del archivo. */

@@ -1,0 +1,282 @@
+/**
+ * Resumen de un flujo generado, compartido por la herramienta del modo agente (`nexo_flow`) y por `@nexo`:
+ * detección de escenario («¿qué pasa si…?»), elección de carpeta del workspace y formateo del texto (plano para el
+ * modelo, markdown escapado para el chat). Todo texto que viene de la IA se recorta y, en el chat, se escapa.
+ */
+import * as vscode from 'vscode';
+import type { GeneratedFlow } from './host-ai';
+import { foldAccents } from './host-context';
+import { normalizeCodePath } from './host-guards';
+
+const MAX_STEPS = 40;
+const MAX_SUMMARY = 600;
+const MAX_ERRORS = 400;
+const MAX_LABEL = 120;
+const MAX_FILE = 260;
+
+export function isSpanish(): boolean {
+  return vscode.workspace.getConfiguration('nexo').get<string>('language') !== 'en';
+}
+
+/** Texto en una línea (saltos colapsados) y recortado a `max`. */
+export function oneLine(value: unknown, max: number): string {
+  if (typeof value !== 'string') return '';
+  const text = value.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
+}
+
+/** Escapa el texto para `stream.markdown` (sin HTML, enlaces ni comandos). */
+export function escapeMarkdown(text: string): string {
+  return text
+    .replace(/[\\`*_{}[\]()#+\-.!|<>~]/g, (c) => `\\${c}`)
+    .replace(/\r?\n/g, '  \n');
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/* ------------------------------ detección ------------------------------ */
+
+const SCENARIO_PATTERNS: readonly RegExp[] = [
+  /\bque\s+(pasa|ocurre|sucede|pasaria|ocurriria|sucederia)\s+(si|cuando)\b/,
+  /\bsi\s+(pongo|meto|introduzco|escribo|envio|mando|falla|no\s+(hay|tengo|existe|esta))\b/,
+  /\bwhat\s+(happens|would\s+happen|will\s+happen)\s+(if|when)\b/,
+  /\bwhat\s+if\b/,
+];
+
+/** ¿La pregunta plantea un escenario concreto («qué pasa si…», «what happens if…»)? */
+export function isScenarioQuestion(question: string): boolean {
+  const folded = foldAccents(question).toLowerCase();
+  return SCENARIO_PATTERNS.some((re) => re.test(folded));
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Carpeta del workspace a la que se limita el contexto: `hint` exacto (sin mayúsculas) o nombre de carpeta citado en la
+ * pregunta (sin tildes ni mayúsculas, palabra completa; gana el nombre más largo). `null` con menos de 2 carpetas o sin
+ * coincidencia (se mantienen todas). El `hint` solo se compara con nombres, nunca como ruta.
+ */
+export function resolveFlowFolder(question: string, hint?: string): vscode.WorkspaceFolder | null {
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  if (folders.length < 2) return null;
+  const wanted = typeof hint === 'string' ? hint.trim().toLowerCase() : '';
+  if (wanted) {
+    const exact = folders.find((f) => f.name.toLowerCase() === wanted);
+    if (exact) return exact;
+  }
+  const text = foldAccents(question).toLowerCase();
+  let best: vscode.WorkspaceFolder | null = null;
+  for (const folder of folders) {
+    const name = foldAccents(folder.name).toLowerCase().trim();
+    if (!name) continue;
+    if (!new RegExp(`(^|[^a-z0-9])${escapeRegExp(name)}([^a-z0-9]|$)`).test(text)) continue;
+    if (!best || name.length > foldAccents(best.name).trim().length) best = folder;
+  }
+  return best;
+}
+
+/* ------------------------------ escenario ------------------------------ */
+
+interface ScenarioWhere {
+  mountId: string;
+  file: string;
+  line: number | null;
+}
+
+interface ScenarioInfo {
+  label: string;
+  kind: string;
+  badge: string;
+  httpStatus: number | null;
+  title: string;
+  userImpact: string;
+  conclusion: string;
+  /** Índice (base 1) del paso donde falla o se detiene; 0 si no hay. */
+  stepIndex: number;
+  stepLabel: string;
+  where: ScenarioWhere | null;
+}
+
+function refOf(value: unknown): ScenarioWhere | null {
+  const ref = asObject(value);
+  if (!ref || typeof ref['file'] !== 'string' || !ref['file'].trim()) return null;
+  const line = typeof ref['line'] === 'number' && Number.isFinite(ref['line']) && ref['line'] > 0 ? Math.floor(ref['line']) : null;
+  return { mountId: typeof ref['mountId'] === 'string' ? ref['mountId'].trim() : '', file: ref['file'].trim(), line };
+}
+
+function scenarioInfo(generated: GeneratedFlow): ScenarioInfo | null {
+  const scenario = asObject(generated.flow['scenario']);
+  const result = scenario ? asObject(scenario['result']) : null;
+  if (!scenario || !result) return null;
+  const kind = typeof result['kind'] === 'string' ? result['kind'] : 'none';
+  const steps = asArray(generated.flow['steps']).map(asObject);
+  const failId = typeof result['failStepId'] === 'string' ? result['failStepId'] : '';
+  const index = failId ? steps.findIndex((s) => s !== null && s['id'] === failId) : -1;
+  const failStep = index >= 0 ? steps[index] : null;
+  const where = (kind === 'error' || kind === 'stop') ? (refOf(result['where']) ?? (failStep ? refOf(failStep['ref']) : null)) : null;
+  return {
+    label: oneLine(scenario['label'], 60),
+    kind,
+    badge: oneLine(result['badge'], 60),
+    httpStatus: typeof result['httpStatus'] === 'number' && Number.isFinite(result['httpStatus']) ? result['httpStatus'] : null,
+    title: oneLine(result['title'], 90),
+    userImpact: oneLine(result['userImpact'], 400),
+    conclusion: oneLine(result['conclusion'], 900),
+    stepIndex: index >= 0 ? index + 1 : 0,
+    stepLabel: failStep ? (oneLine(failStep['label'], MAX_LABEL) || oneLine(failStep['title'], MAX_LABEL)) : '',
+    where,
+  };
+}
+
+function whereText(where: ScenarioWhere | null, esc: (s: string) => string): string {
+  if (!where) return '';
+  const multi = (vscode.workspace.workspaceFolders ?? []).length > 1;
+  const file = oneLine(multi && where.mountId ? `${where.mountId}/${where.file}` : where.file, MAX_FILE);
+  return `${esc(file)}${where.line ? `:${where.line}` : ''}`;
+}
+
+/** Ubicación del fallo del escenario para `stream.anchor`; `undefined` si no hay o no se puede resolver. */
+export function failLocation(generated: GeneratedFlow): vscode.Location | undefined {
+  const where = scenarioInfo(generated)?.where;
+  if (!where) return undefined;
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const folder = folders.length > 1 ? folders.find((f) => f.name === where.mountId) : folders[0];
+  const rel = normalizeCodePath(where.file);
+  if (!folder || !rel) return undefined;
+  const line = Math.max(0, (where.line ?? 1) - 1);
+  return new vscode.Location(vscode.Uri.joinPath(folder.uri, rel), new vscode.Position(line, 0));
+}
+
+/* ------------------------------ pasos ------------------------------ */
+
+/** Líneas `N. origen → destino: etiqueta (archivo:línea)` de los primeros `max` pasos y cuántos quedan. */
+function stepLines(flow: Record<string, unknown>, max: number, esc: (s: string) => string): { lines: string[]; more: number } {
+  const lanes = new Map<string, string>();
+  for (const lane of asArray(flow['lanes'])) {
+    const o = asObject(lane);
+    if (!o) continue;
+    const id = typeof o['id'] === 'string' ? o['id'] : '';
+    if (id) lanes.set(id, oneLine(o['name'], 80) || oneLine(id, 80));
+  }
+  const nameOf = (id: unknown): string => {
+    const key = typeof id === 'string' ? id : '';
+    return esc(lanes.get(key) ?? (oneLine(key, 80) || '?'));
+  };
+  const steps = asArray(flow['steps']).map(asObject).filter((s): s is Record<string, unknown> => s !== null);
+  const lines = steps.slice(0, max).map((step, index) => {
+    const label = oneLine(step['label'], MAX_LABEL) || oneLine(step['title'], MAX_LABEL);
+    const ref = asObject(step['ref']);
+    const file = ref ? oneLine(ref['file'], MAX_FILE) : '';
+    const line = ref && typeof ref['line'] === 'number' && Number.isFinite(ref['line']) ? `:${ref['line']}` : '';
+    const where = file ? ` (${esc(file)}${line})` : '';
+    return `${index + 1}. ${nameOf(step['from'])} → ${nameOf(step['to'])}: ${esc(label)}${where}`;
+  });
+  return { lines, more: Math.max(0, steps.length - max) };
+}
+
+/* ------------------------------ textos ------------------------------ */
+
+const identity = (s: string): string => s;
+
+export function flowLinkTitle(): string {
+  return isSpanish() ? 'Visualizar flujo' : 'Visualize flow';
+}
+
+function scenarioLines(info: ScenarioInfo, es: boolean): string[] {
+  const badge = info.badge ? ` · ${info.badge}` : '';
+  const lines = [`${es ? 'Escenario' : 'Scenario'}: ${info.label}${badge}`];
+  if (info.userImpact) lines.push(`${es ? 'Qué ve el usuario' : 'What the user sees'}: ${info.userImpact}`);
+  if (info.kind === 'error' || info.kind === 'stop') {
+    const head = info.kind === 'error' ? (es ? 'Dónde falla' : 'Where it fails') : (es ? 'Dónde se detiene' : 'Where it stops');
+    const step = info.stepIndex ? `${es ? 'paso' : 'step'} ${info.stepIndex}` : '';
+    const label = info.stepLabel ? ` — ${info.stepLabel}` : '';
+    const place = whereText(info.where, identity);
+    lines.push(`${head}: ${step}${label}${place ? ` (${place})` : ''}`.replace(/:\s*$/, ''));
+  } else if (info.kind === 'ok') {
+    lines.push(es ? 'El flujo termina correctamente.' : 'The flow ends successfully.');
+  }
+  if (info.conclusion) lines.push(`${es ? 'Conclusión' : 'Conclusion'}: ${info.conclusion}`);
+  return lines;
+}
+
+/** Texto plano y acotado que recibe el agente, con la instrucción de terminar con el enlace «Visualizar flujo». */
+export function formatFlowToolText(generated: GeneratedFlow, showUri: string): string {
+  const es = isSpanish();
+  const flow = generated.flow;
+  const title = oneLine(generated.title, 120);
+  const lines: string[] = [
+    `${es ? 'Flujo' : 'Flow'}: ${title}`,
+    `${es ? 'Modelo' : 'Model'}: ${oneLine(generated.model, 120)}`,
+    `${es ? 'Resumen' : 'Summary'}: ${oneLine(flow['summary'], MAX_SUMMARY)}`,
+  ];
+  if (typeof flow['errorSummary'] === 'string') lines.push(`${es ? 'Errores' : 'Errors'}: ${oneLine(flow['errorSummary'], MAX_ERRORS)}`);
+  const info = scenarioInfo(generated);
+  if (info) lines.push(...scenarioLines(info, es));
+  else if (generated.scenarioAsked) {
+    lines.push(es ? 'Escenario: el modelo no devolvió un escenario simulable; revisa «Simular datos» en el panel.' : 'Scenario: the model did not return a simulable scenario; check "Simular datos" in the panel.');
+  }
+  const steps = stepLines(flow, MAX_STEPS, identity);
+  lines.push(es ? 'Pasos:' : 'Steps:', ...steps.lines);
+  if (steps.more > 0) lines.push(es ? `… y ${steps.more} pasos más` : `… and ${steps.more} more steps`);
+  const opened = info
+    ? (es ? 'abierto en «Simular datos» con el escenario' : 'opened in "Simular datos" with the scenario')
+    : (es ? 'abierto' : 'opened');
+  lines.push(es
+    ? `El diagrama interactivo ya está ${opened} en el panel «Flujo · ${title}» (Recorrido, Simular datos, Analizar logs, Base de datos, Simular cambios). No se ha modificado ningún archivo.`
+    : `The interactive diagram is already ${opened} in the panel "Flujo · ${title}" (Recorrido, Simular datos, Analizar logs, Base de datos, Simular cambios). No file has been modified.`);
+  lines.push(`End your answer with this exact markdown link on its own line, unchanged: [${flowLinkTitle()}](${showUri})`);
+  return lines.join('\n');
+}
+
+const MAX_CHAT_STEPS = 8;
+
+/** Markdown del chat de `@nexo`: título, resumen, escenario y pasos; todo texto de la IA escapado. */
+export function formatFlowChatMarkdown(generated: GeneratedFlow): string {
+  const es = isSpanish();
+  const flow = generated.flow;
+  const esc = escapeMarkdown;
+  const parts: string[] = [`**${esc(oneLine(generated.title, 120))}**`];
+  const summary = oneLine(flow['summary'], MAX_SUMMARY);
+  if (summary) parts.push(esc(summary));
+  const info = scenarioInfo(generated);
+  if (info) {
+    const badge = info.badge ? ` · ${info.badge}` : '';
+    const block: string[] = [`**${esc(`${es ? 'Escenario' : 'Scenario'}: ${info.label}${badge}`)}**`];
+    if (info.userImpact) block.push(`**${es ? 'Qué ve el usuario' : 'What the user sees'}:** ${esc(info.userImpact)}`);
+    if (info.kind === 'error' || info.kind === 'stop') {
+      const head = info.kind === 'error' ? (es ? 'Dónde falla' : 'Where it fails') : (es ? 'Dónde se detiene' : 'Where it stops');
+      const step = info.stepIndex ? `${es ? 'paso' : 'step'} ${info.stepIndex}` : '';
+      const label = info.stepLabel ? ` — ${esc(info.stepLabel)}` : '';
+      const place = whereText(info.where, esc);
+      const text = `${step}${label}${place ? ` (${place})` : ''}`.trim();
+      if (text) block.push(`**${head}:** ${text}`);
+    } else if (info.kind === 'ok') {
+      block.push(es ? 'El flujo termina correctamente.' : 'The flow ends successfully.');
+    }
+    if (info.conclusion) block.push(`**${es ? 'Conclusión' : 'Conclusion'}:** ${esc(info.conclusion)}`);
+    parts.push(block.join('\n\n'));
+  } else if (generated.scenarioAsked) {
+    parts.push(es
+      ? 'No se pudo generar un escenario simulable para esta pregunta; puedes probarlo en «Simular datos» del panel\\.'
+      : 'A simulable scenario could not be generated for this question; you can try it in "Simular datos" in the panel\\.');
+    if (typeof flow['errorSummary'] === 'string') {
+      const errors = oneLine(flow['errorSummary'], MAX_ERRORS);
+      if (errors) parts.push(`**${es ? 'Errores' : 'Errors'}:** ${esc(errors)}`);
+    }
+  }
+  const steps = stepLines(flow, MAX_CHAT_STEPS, esc);
+  if (steps.lines.length) {
+    const list = steps.lines.join('\n');
+    const more = steps.more > 0 ? `\n\n${es ? `… y ${steps.more} pasos más` : `… and ${steps.more} more steps`}` : '';
+    parts.push(`**${es ? 'Pasos' : 'Steps'}**\n\n${list}${more}`);
+  }
+  return parts.join('\n\n');
+}

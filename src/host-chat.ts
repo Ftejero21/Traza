@@ -7,17 +7,7 @@ import * as vscode from 'vscode';
 import { FlowPanel } from './flow-panel';
 import { isCancelled, type HostAi } from './host-ai';
 import type { PinnedRef } from './host-context';
-
-function isSpanish(): boolean {
-  return vscode.workspace.getConfiguration('nexo').get<string>('language') !== 'en';
-}
-
-/** Escapa el texto para `stream.markdown` (sin HTML, enlaces ni comandos). */
-function escapeMarkdown(text: string): string {
-  return text
-    .replace(/[\\`*_{}[\]()#+\-.!|<>~]/g, (c) => `\\${c}`)
-    .replace(/\r?\n/g, '  \n');
-}
+import { escapeMarkdown, failLocation, formatFlowChatMarkdown, isScenarioQuestion, isSpanish, oneLine, resolveFlowFolder } from './host-flow-summary';
 
 function referencesOf(request: vscode.ChatRequest): PinnedRef[] {
   const out: PinnedRef[] = [];
@@ -68,15 +58,26 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
         stream.markdown(`**${escapeMarkdown(title)}**\n\n${escapeMarkdown(summary)}`);
         return {};
       }
-      stream.progress(es ? 'Preparando el flujo…' : 'Preparing the flow…');
+      const folder = resolveFlowFolder(prompt);
+      const scenario = isScenarioQuestion(prompt);
+      const folderName = folder ? oneLine(folder.name, 120) : '';
+      stream.progress(es
+        ? `Preparando el flujo${folderName ? ` de ${folderName}` : ''}…`
+        : `Preparing the flow${folderName ? ` of ${folderName}` : ''}…`);
       const generated = await ai.generateFlow({
         question: prompt, model: request.model, pinned: referencesOf(request), useActiveEditor: true, token,
         progress: (message) => stream.progress(message),
+        ...(folder ? { folder: folder.name } : {}), scenario,
       });
-      FlowPanel.show(context, ai, { flow: generated.flow, sample: false, title: generated.title, proposals: [], source: { model: generated.model } });
-      const summary = typeof generated.flow['summary'] === 'string' ? generated.flow['summary'] : '';
-      stream.markdown(`**${escapeMarkdown(generated.title)}**\n\n${escapeMarkdown(summary)}`);
-      stream.button({ command: 'nexo.showLastFlow', title: es ? 'Abrir flujo' : 'Open flow' });
+      FlowPanel.showGenerated(context, ai, generated);
+      stream.markdown(formatFlowChatMarkdown(generated));
+      const location = failLocation(generated);
+      if (location) stream.anchor(location, es ? 'Ver dónde falla' : 'See where it fails');
+      const flowId = typeof generated.flow['id'] === 'string' ? generated.flow['id'] : '';
+      stream.button({
+        command: 'nexo.showFlow', arguments: flowId ? [{ flowId }] : [],
+        title: es ? 'Visualizar flujo' : 'Visualize flow',
+      });
       return {};
     } catch (error: unknown) {
       if (isCancelled(error) || token.isCancellationRequested) return {};

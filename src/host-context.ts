@@ -194,6 +194,8 @@ export interface CollectOptions {
   /** Rutas del mapa (con prefijo de carpeta en multi-root) que se fijan primero (archivos del flujo en PROPOSE). */
   pinnedPaths?: string[];
   useActiveEditor: boolean;
+  /** Nombre de carpeta (mount) del workspace multi-root a la que se limita el contexto. */
+  folder?: string;
   token: vscode.CancellationToken;
   progress?: (message: string) => void;
   /** Paso barato de selección de archivos con la IA; si falla o no existe, solo palabras clave. */
@@ -384,8 +386,15 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
   const snapshot = await listFiles();
   cancelled(token);
   if (!snapshot.mounts.length) throw new Error('No hay carpetas abiertas en el workspace.');
-  const candidates = snapshot.files.filter(allowed);
-  const mounts: ContextMount[] = snapshot.mounts.map((m) => ({ id: m.id, prefix: m.path || '(raiz)', name: m.name }));
+  let candidates = snapshot.files.filter(allowed);
+  let mountInfos = snapshot.mounts;
+  const only = options.folder && snapshot.mounts.length > 1 ? snapshot.mounts.find((m) => m.id === options.folder) : undefined;
+  if (only) {
+    const prefix = `${only.id}/`;
+    candidates = candidates.filter((f) => f.path.startsWith(prefix));
+    mountInfos = [only];
+  }
+  const mounts: ContextMount[] = mountInfos.map((m) => ({ id: m.id, prefix: m.path || '(raiz)', name: m.name }));
 
   const activeInfo = options.useActiveEditor ? activeOf(candidates) : null;
   const terms = termsOf([options.question, activeInfo?.selection?.text ?? '', activeInfo ? baseName(activeInfo.file.path) : '']);

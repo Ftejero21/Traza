@@ -113,8 +113,26 @@ function showError(error: unknown): void {
   void vscode.window.showErrorMessage(error instanceof Error && error.message ? error.message.slice(0, 500) : 'Error inesperado.');
 }
 
+const FLOW_ID = /^[0-9a-f-]{36}$/i;
+
 function showGenerated(context: vscode.ExtensionContext, ai: HostAi, generated: GeneratedFlow): void {
-  FlowPanel.show(context, ai, { flow: generated.flow, sample: false, title: generated.title, proposals: [], source: { model: generated.model } });
+  FlowPanel.showGenerated(context, ai, generated);
+}
+
+/** «Nexo: Visualizar flujo» (`{ flowId }`): reabre un flujo de la sesión, o el último generado sin argumento. Sin IA. */
+function showFlow(context: vscode.ExtensionContext, ai: HostAi, arg?: unknown): void {
+  const es = (vscode.workspace.getConfiguration('nexo').get<string>('language') ?? 'es') !== 'en';
+  const raw = arg && typeof arg === 'object' && !Array.isArray(arg) ? (arg as { flowId?: unknown }).flowId : undefined;
+  let generated: GeneratedFlow | null;
+  if (arg === undefined || arg === null) generated = ai.lastGenerated;
+  else generated = typeof raw === 'string' && FLOW_ID.test(raw) ? ai.flowById(raw) : null;
+  if (generated) {
+    showGenerated(context, ai, generated);
+    return;
+  }
+  void vscode.window.showInformationMessage(arg === undefined || arg === null
+    ? (es ? 'Todavía no se ha generado ningún flujo. Usa «Nexo: Generar flujo».' : 'No flow has been generated yet. Use "Nexo: Generar flujo".')
+    : (es ? 'No se encontró ese flujo en esta sesión; vuelve a generarlo.' : 'That flow was not found in this session; generate it again.'));
 }
 
 /** «Nexo: Generar flujo»: pregunta, archivo activo y selección como pista, y abre el panel. */
@@ -177,6 +195,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (last) showGenerated(context, ai, last);
       else void vscode.window.showInformationMessage('Todavía no se ha generado ningún flujo. Usa «Nexo: Generar flujo».');
     }),
+    vscode.commands.registerCommand('nexo.showFlow', (arg?: unknown) => showFlow(context, ai, arg)),
     ...registerChatParticipant(context, ai),
     ...registerFlowTool(context, ai),
     registerFlowUriHandler(context, ai),

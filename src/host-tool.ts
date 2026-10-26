@@ -6,36 +6,27 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { FlowPanel } from './flow-panel';
-import { isCancelled, type GeneratedFlow, type HostAi } from './host-ai';
+import { isCancelled, type HostAi } from './host-ai';
 import type { PinnedRef } from './host-context';
+import { formatFlowToolText, isScenarioQuestion, isSpanish, oneLine, resolveFlowFolder } from './host-flow-summary';
 import { MAX_ASK_CHARS, normalizeCodePath } from './host-guards';
 
 interface FlowToolInput {
   question: string;
   files?: string[];
+  /** Nombre de carpeta/proyecto del workspace mencionado por el usuario (solo se compara con nombres de carpeta). */
+  project?: string;
+  /** `true` si el usuario pregunta qué pasa en una situación concreta. */
+  scenario?: boolean;
 }
 
 const MAX_FILES = 12;
 const MAX_FILE_CHARS = 520;
-const MAX_STEPS = 40;
-const MAX_SUMMARY = 600;
-const MAX_ERRORS = 400;
-const MAX_LABEL = 120;
+const MAX_PROJECT = 120;
 const MAX_CONFIRM_QUESTION = 200;
 
 /** Ejecución en curso de la herramienta (gana la última invocación). */
 let currentRun: vscode.CancellationTokenSource | undefined;
-
-export function isSpanish(): boolean {
-  return vscode.workspace.getConfiguration('nexo').get<string>('language') !== 'en';
-}
-
-/** Texto en una línea (saltos colapsados) y recortado a `max`. */
-export function oneLine(value: unknown, max: number): string {
-  if (typeof value !== 'string') return '';
-  const text = value.replace(/[\r\n]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
-  return text.length > max ? `${text.slice(0, Math.max(0, max - 1))}…` : text;
-}
 
 function questionOf(input: unknown): string {
   const raw = input && typeof input === 'object' ? (input as { question?: unknown }).question : undefined;
@@ -84,54 +75,16 @@ function pinnedFromFiles(files: unknown): PinnedRef[] {
   return out;
 }
 
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
+/** `project` de la tool (string ≤120); `undefined` si no es válido. */
+function projectOf(input: unknown): string | undefined {
+  const raw = input && typeof input === 'object' ? (input as { project?: unknown }).project : undefined;
+  const project = typeof raw === 'string' ? raw.trim() : '';
+  return project && project.length <= MAX_PROJECT ? project : undefined;
 }
 
-function asObject(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
-}
-
-/** Texto plano y acotado que recibe el agente. */
-function formatResult(generated: GeneratedFlow): string {
-  const es = isSpanish();
-  const flow = generated.flow as Record<string, unknown>;
-  const title = oneLine(generated.title, 120);
-  const lanes = new Map<string, string>();
-  for (const lane of asArray(flow['lanes'])) {
-    const o = asObject(lane);
-    if (!o) continue;
-    const id = typeof o['id'] === 'string' ? o['id'] : '';
-    if (id) lanes.set(id, oneLine(o['name'], 80) || oneLine(id, 80));
-  }
-  const nameOf = (id: unknown): string => {
-    const key = typeof id === 'string' ? id : '';
-    return lanes.get(key) ?? (oneLine(key, 80) || '?');
-  };
-  const lines: string[] = [
-    `${es ? 'Flujo' : 'Flow'}: ${title}`,
-    `${es ? 'Modelo' : 'Model'}: ${oneLine(generated.model, 120)}`,
-    `${es ? 'Resumen' : 'Summary'}: ${oneLine(flow['summary'], MAX_SUMMARY)}`,
-  ];
-  if (typeof flow['errorSummary'] === 'string') lines.push(`${es ? 'Errores' : 'Errors'}: ${oneLine(flow['errorSummary'], MAX_ERRORS)}`);
-  const steps = asArray(flow['steps']).map(asObject).filter((s): s is Record<string, unknown> => s !== null);
-  lines.push(es ? 'Pasos:' : 'Steps:');
-  steps.slice(0, MAX_STEPS).forEach((step, index) => {
-    const label = oneLine(step['label'], MAX_LABEL) || oneLine(step['title'], MAX_LABEL);
-    const ref = asObject(step['ref']);
-    const file = ref ? oneLine(ref['file'], 260) : '';
-    const line = ref && typeof ref['line'] === 'number' && Number.isFinite(ref['line']) ? `:${ref['line']}` : '';
-    const where = file ? ` (${file}${line})` : '';
-    lines.push(`${index + 1}. ${nameOf(step['from'])} → ${nameOf(step['to'])}: ${label}${where}`);
-  });
-  if (steps.length > MAX_STEPS) {
-    const more = steps.length - MAX_STEPS;
-    lines.push(es ? `… y ${more} pasos más` : `… and ${more} more steps`);
-  }
-  lines.push(es
-    ? `El diagrama interactivo se ha abierto en el panel «Flujo · ${title}» (Recorrido, Simular datos, Analizar logs, Base de datos, Simular cambios). No se ha modificado ningún archivo.`
-    : `The interactive diagram has been opened in the panel "Flujo · ${title}" (Recorrido, Simular datos, Analizar logs, Base de datos, Simular cambios). No file has been modified.`);
-  return lines.join('\n');
+function scenarioOf(input: unknown, question: string): boolean {
+  const flag = input && typeof input === 'object' ? (input as { scenario?: unknown }).scenario : undefined;
+  return flag === true || isScenarioQuestion(question);
 }
 
 function errorMessage(error: unknown): string {
@@ -150,6 +103,9 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
         ? 'Nexo enviará al proveedor del modelo configurado en Nexo las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). No se modificará ningún archivo.\n\nPregunta: '
         : 'Nexo will send the relevant workspace paths and code fragments to the provider of the model configured in Nexo (never sensitive files such as .env or keys, and with secrets masked). No file will be modified.\n\nQuestion: ');
       message.appendText(question);
+      const rawQuestion = typeof raw === 'string' ? raw : '';
+      const folder = rawQuestion ? resolveFlowFolder(rawQuestion, projectOf(options.input)) : null;
+      if (folder) message.appendText(`\n\n${es ? 'Carpeta' : 'Folder'}: ${oneLine(folder.name, MAX_PROJECT)}`);
       return {
         invocationMessage: es ? 'Generando el flujo con Nexo…' : 'Generating the flow with Nexo…',
         confirmationMessages: { title: es ? 'Generar flujo con Nexo' : 'Generate flow with Nexo', message },
@@ -159,15 +115,22 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
       const question = questionOf(options.input);
       const files = (options.input as { files?: unknown } | undefined)?.files;
       const pinned = pinnedFromFiles(files);
+      const folder = resolveFlowFolder(question, projectOf(options.input));
+      const scenario = scenarioOf(options.input, question);
       currentRun?.cancel();
       currentRun?.dispose();
       const cts = new vscode.CancellationTokenSource();
       currentRun = cts;
       const listener = token.onCancellationRequested(() => cts.cancel());
       try {
-        const generated = await ai.generateFlow({ question, pinned, useActiveEditor: true, token: cts.token, progress: () => {} });
-        FlowPanel.show(context, ai, { flow: generated.flow, sample: false, title: generated.title, proposals: [], source: { model: generated.model } });
-        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(formatResult(generated))]);
+        const generated = await ai.generateFlow({
+          question, pinned, useActiveEditor: true, token: cts.token, progress: () => {},
+          ...(folder ? { folder: folder.name } : {}), scenario,
+        });
+        FlowPanel.showGenerated(context, ai, generated);
+        const flowId = typeof generated.flow['id'] === 'string' ? generated.flow['id'] : '';
+        const showUri = `${vscode.env.uriScheme}://${context.extension.id}/show?id=${encodeURIComponent(flowId)}`;
+        return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(formatFlowToolText(generated, showUri))]);
       } catch (error: unknown) {
         if (token.isCancellationRequested) throw new vscode.CancellationError();
         if (isCancelled(error)) {

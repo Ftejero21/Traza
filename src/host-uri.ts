@@ -2,11 +2,14 @@ import * as vscode from 'vscode';
 import { FlowPanel } from './flow-panel';
 import { MAX_ASK_CHARS } from './host-guards';
 import { HostAi, isCancelled } from './host-ai';
-import { isSpanish, oneLine } from './host-tool';
+import { isSpanish, oneLine } from './host-flow-summary';
 
 /**
- * Deep link: `vscode://nexo-local.nexo-vscode/flow?q=…&mode=sim|logs|db`.
- * La URI es entrada no confiable: siempre pide confirmación modal antes de enviar nada al modelo.
+ * Deep links:
+ * - `vscode://nexo-local.nexo-vscode/flow?q=…&mode=sim|logs|db`: genera un flujo. La URI es entrada no confiable:
+ *   siempre pide confirmación modal antes de enviar nada al modelo.
+ * - `vscode://nexo-local.nexo-vscode/show?id=<uuid>`: reabre un flujo ya generado en esta sesión (caché en memoria).
+ *   Sin IA, sin enviar datos y sin modal; el id se valida y solo se busca en la caché.
  */
 
 let busy = false;
@@ -18,6 +21,13 @@ const MAX_FOLDERS = 3;
 
 export function registerFlowUriHandler(context: vscode.ExtensionContext, ai: HostAi): vscode.Disposable {
   return vscode.window.registerUriHandler({ handleUri: (uri) => handleFlowUri(context, ai, uri) });
+}
+
+const FLOW_ID = /^[0-9a-f-]{36}$/i;
+
+function parseShowUri(uri: vscode.Uri): string | null {
+  const id = new URLSearchParams(uri.query).get('id')?.trim() ?? '';
+  return FLOW_ID.test(id) ? id : null;
 }
 
 function parseFlowUri(uri: vscode.Uri): { question: string; mode?: UriMode } | 'badPath' | 'badQuestion' {
@@ -45,6 +55,17 @@ function folderLabel(): string {
 async function handleFlowUri(context: vscode.ExtensionContext, ai: HostAi, uri: vscode.Uri): Promise<void> {
   const es = isSpanish();
   try {
+    if (uri.path.replace(/\/+$/, '') === '/show') {
+      const id = parseShowUri(uri);
+      if (!id) {
+        void vscode.window.showErrorMessage(es
+          ? 'El enlace de Nexo no trae un identificador de flujo válido (parámetro id).'
+          : 'The Nexo link has no valid flow identifier (id parameter).');
+        return;
+      }
+      await vscode.commands.executeCommand('nexo.showFlow', { flowId: id });
+      return;
+    }
     if (busy) {
       void vscode.window.showInformationMessage(es
         ? 'Nexo ya está generando un flujo desde un enlace. Espera a que termine.'

@@ -8,6 +8,9 @@ export type { WorkspaceCodeDatabaseMetadata };
 
 export type FlowKind = 'simulate' | 'logs' | 'ui-plan' | 'db-map';
 export type NexoLanguage = 'es' | 'en';
+
+/** Apariencia de la vista: paleta y fuentes originales de Nexo, o los colores y fuentes del tema de VS Code. */
+export type NexoTheme = 'nexo' | 'vscode';
 export type NotifyLevel = 'info' | 'success' | 'warning' | 'danger';
 
 export interface FlowRequestBody {
@@ -74,7 +77,7 @@ export type WebviewToHost =
   | { type: 'ask'; text: string };
 
 export type HostToWebview =
-  | { type: 'init' | 'config'; language: NexoLanguage; modelName: string | null }
+  | { type: 'init' | 'config'; language: NexoLanguage; modelName: string | null; theme: NexoTheme }
   | {
     type: 'openFlow'; flow: unknown; sample: boolean; step?: number; mode?: 'walk' | 'sim' | 'logs' | 'db' | 'changes'; proposals?: unknown[];
     /** Flujo recién generado con el modelo de VS Code (abre su escenario, si lo trae, en «Simular»). */

@@ -49,7 +49,7 @@ export class MockBridge extends NexoBridge {
     if (this.started) return;
     this.started = true;
     setTimeout(() => {
-      this.subject.next({ type: 'init', language: 'es', modelName: 'Modelo de ejemplo' });
+      this.subject.next({ type: 'init', language: 'es', modelName: 'Modelo de ejemplo', theme: 'nexo' });
       this.subject.next({ type: 'openFlow', flow: SAMPLE_FLOW, sample: true, proposals: SAMPLE_PROPOSALS });
     });
   }

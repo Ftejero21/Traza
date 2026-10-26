@@ -113,6 +113,10 @@
 .wtd-pop__dl dd { margin: 0; min-width: 0; overflow-wrap: anywhere; color: var(--wce-text); }
 .wtd-pop__actions { display: flex; flex-wrap: wrap; gap: 6px; }
 
+/* Código del método de la píldora de la función (modo «Base de datos») */
+.wtd-codepop { z-index: 8; overflow: auto; gap: 10px; }
+.wtd-codepop__fn { font: 600 12px "JetBrains Mono", Consolas, monospace; color: var(--wce-accent-text); overflow-wrap: anywhere; }
+
 /* ------------------------------ estados ------------------------------ */
 .wtd-none { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex-shrink: 0; padding: 10px 14px 0; }
 .wtd--compact .wtd-none { padding: 0 0 8px; }
@@ -171,7 +175,13 @@
 }
 .wtd-xactor > .bi { color: var(--wce-accent-text); }
 .wtd-xactor > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.wtd-xactor.is-fn > span { font: 600 11px "JetBrains Mono", Consolas, monospace; }
+.wtd-xactor.is-fn { padding: 0 14px; gap: 8px; }
+.wtd-xactor.is-fn > span { font: 600 12px "JetBrains Mono", Consolas, monospace; }
+button.wtd-xactor { appearance: none; margin: 0; font: 700 12px Inter, system-ui, sans-serif; }
+.wtd-xactor.is-clickable { cursor: pointer; }
+.wtd-xactor.is-clickable:hover, .wtd-xactor.is-clickable.is-open { border-color: var(--wce-accent); }
+.wtd-xactor.is-clickable:focus-visible { outline: 2px solid var(--wce-accent); outline-offset: 2px; }
+.wtd-xactor__code { font-size: 12px; opacity: 0.75; }
 .wtd-xactor.is-active { border-color: var(--wce-accent); box-shadow: 0 0 0 3px var(--wce-accent-soft), 0 0 18px -2px var(--wce-accent); }
 
 .wtd-row.is-xfill { background: var(--wce-success-soft); animation: wtd-xflash 1.1s ease-out; }
@@ -286,7 +296,7 @@
 @keyframes wtd-xplus { 0% { opacity: 0; transform: scale(0.4); } 60% { opacity: 1; transform: scale(1.25); } 100% { opacity: 1; transform: scale(1); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .wtd-node, .wtd-caption, .wtd-pop { animation: none; }
+  .wtd-node, .wtd-caption, .wtd-pop, .wtd-codepop { animation: none; }
   .wtd-edge { transition: none; }
   .wtd-edge__base { animation: none; stroke-dashoffset: 0; stroke-dasharray: none; }
   .wtd-edge__pulse { display: none; }

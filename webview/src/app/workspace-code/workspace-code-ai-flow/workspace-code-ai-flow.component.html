@@ -181,7 +181,8 @@
         </div>
         <div class="wcf-db__diagram">
           <app-workspace-code-db-table-diagram [connectionKey]="v.connectionKey" [tableName]="v.script.table" [schema]="v.schema" [schemaKey]="v.schemaKey"
-            [flowScript]="v.script" [flowIndex]="dbFlowIndex" [flowSpeed]="flowService.player.speed"></app-workspace-code-db-table-diagram>
+            [flowScript]="v.script" [flowIndex]="dbFlowIndex" [flowSpeed]="flowService.player.speed"
+            [fnCodeLoader]="dbFnCodeLoader" (fnCodeOpen)="flowService.openSnippetView($event)"></app-workspace-code-db-table-diagram>
         </div>
       </ng-container>
     </div>

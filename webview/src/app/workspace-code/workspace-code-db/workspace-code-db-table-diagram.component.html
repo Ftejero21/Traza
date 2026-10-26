@@ -91,10 +91,21 @@
         <div class="wtd-more" *ngIf="n.hidden" [style.height.px]="22">{{ 'dbw.diagram.more' | wcT: { count: n.hidden } }}</div>
       </div>
 
-      <div class="wtd-xactor" *ngFor="let a of xActors; trackBy: trackActor" [class.is-active]="a.active" [class.is-fn]="a.fn" [attr.title]="a.title || null"
-        [style.left.px]="a.x" [style.top.px]="a.y" [style.width.px]="a.w" [style.height.px]="a.h">
-        <i class="bi" [ngClass]="a.icon"></i><span>{{ a.label }}</span>
-      </div>
+      <ng-container *ngFor="let a of xActors; trackBy: trackActor">
+        <button *ngIf="a.fn && fnCodeClickable; else plainActor" type="button" class="wtd-xactor is-fn is-clickable" [class.is-active]="a.active" [class.is-open]="!!fnCode"
+          [style.left.px]="a.x" [style.top.px]="a.y" [style.width.px]="a.w" [style.height.px]="a.h"
+          aria-haspopup="dialog" [attr.aria-expanded]="!!fnCode" [attr.aria-controls]="uid + '-code'"
+          [attr.title]="'dbw.fnCode.show' | wcT: { fn: fnCodeName }" [attr.aria-label]="'dbw.fnCode.show' | wcT: { fn: fnCodeName }"
+          (click)="toggleFnCode($event)">
+          <i class="bi" [ngClass]="a.icon" aria-hidden="true"></i><span>{{ a.label }}</span><i class="bi bi-code-slash wtd-xactor__code" aria-hidden="true"></i>
+        </button>
+        <ng-template #plainActor>
+          <div class="wtd-xactor" [class.is-active]="a.active" [class.is-fn]="a.fn" [attr.title]="a.title || null"
+            [style.left.px]="a.x" [style.top.px]="a.y" [style.width.px]="a.w" [style.height.px]="a.h">
+            <i class="bi" [ngClass]="a.icon"></i><span>{{ a.label }}</span>
+          </div>
+        </ng-template>
+      </ng-container>
 
       <ng-container *ngIf="explain && xFlow as f">
         <div class="wtd-xpacket" *ngFor="let k of [explain.player.stepKey]" [class.is-reverse]="f.reverse" [style.offset-path]="f.css" aria-hidden="true">
@@ -125,6 +136,16 @@
         <dt>ON UPDATE</dt><dd class="wdx-mono">{{ r.onUpdate || '—' }}</dd>
         <dt>{{ 'dbw.dlg.relation.name' | wcT }}</dt><dd class="wdx-mono">{{ r.name }}</dd>
       </dl>
+    </aside>
+
+    <!-- Código del método de la píldora de la función (modo «Base de datos») -->
+    <aside class="wtd-pop wtd-codepop" *ngIf="fnCode as fc" [id]="uid + '-code'" [ngStyle]="codePopStyle" role="dialog" [attr.aria-label]="'dbw.fnCode.title' | wcT">
+      <button type="button" class="wdx-btn wdx-btn--icon wdx-btn--sm wdx-btn--ghost wtd-pop__close wtd-codepop__close" [attr.aria-label]="'dbw.fnCode.close' | wcT" (click)="closeFnCode(true)"><i class="bi bi-x-lg"></i></button>
+      <h3 class="wtd-pop__title"><i class="bi bi-code-slash"></i><span>{{ 'dbw.fnCode.title' | wcT }}</span></h3>
+      <code class="wtd-codepop__fn">{{ fc.fn }}()</code>
+      <p class="wtd-pop__explain" role="status" *ngIf="fc.status === 'loading'"><i class="bi bi-arrow-repeat wdx-spin"></i> {{ 'dbw.fnCode.loading' | wcT }}</p>
+      <app-workspace-code-ai-snippet *ngIf="fc.status === 'ready'" [view]="fc.view" tone="accent" (open)="fc.view && fnCodeOpen.emit(fc.view)"></app-workspace-code-ai-snippet>
+      <p class="wdx-notice" role="note" *ngIf="fc.status === 'empty'"><i class="bi bi-info-circle"></i><span>{{ 'dbw.fnCode.empty' | wcT }}</span></p>
     </aside>
 
     <!-- Modo «Explicar»: capa de pantalla (tamaño constante, no escala con el zoom). -->

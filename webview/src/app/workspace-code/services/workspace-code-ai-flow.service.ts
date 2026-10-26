@@ -874,26 +874,83 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
 
   /* ---------------------------- editor ---------------------------- */
 
-  /** «Abrir en el editor»: solo referencias verificadas (las no verificadas no se pueden abrir). */
+  /**
+   * «Abrir en el editor»: abre el archivo de la referencia en su línea. Una referencia no verificada se abre si su
+   * archivo se resuelve en el proyecto (línea aproximada); si no existe o no está permitido, no hace nada.
+   */
   async openInEditor(ref: CodeRef | null, fileId?: string | null): Promise<void> {
-    if (!ref || ref.verification === 'unverified') return;
-    let id = fileId ?? this.fileIds.get(refKey(ref)) ?? null;
+    if (!ref) return;
+    let id = fileId ?? (ref.verification !== 'unverified' ? this.fileIds.get(refKey(ref)) : null) ?? null;
+    let line = ref.line;
     if (!id) {
       const validator = await this.validator();
       const checked = await validator.verify(ref);
-      if (!checked.file || checked.ref.verification === 'unverified') return;
+      if (!checked.file) return;
       id = checked.file.id;
-      ref = checked.ref;
+      line = checked.ref.line;
     }
-    this.ui = { ...this.ui, revealedFor: `${id}:${ref.line}` };
-    const fileKey = id;
-    const file = this.project.sample ? this.project.project.files.find((f) => f.id === fileKey) ?? null : null;
+    this.postOpenRef(id, line);
+  }
+
+  /** Abre un fragmento mostrado (`SnippetView`) en el editor; los generados o sin archivo del proyecto no se abren. */
+  openSnippetView(view: SnippetView | null): void {
+    if (!view || view.generated || !view.fileId) return;
+    const fileId = view.fileId;
+    if (!this.project.project.files.some((f) => f.id === fileId)) return;
+    this.postOpenRef(fileId, view.highlightLine);
+  }
+
+  private postOpenRef(id: string, line: number): void {
+    const safeLine = Number.isFinite(line) ? Math.max(1, Math.floor(line)) : 1;
+    this.ui = { ...this.ui, revealedFor: `${id}:${safeLine}` };
+    const file = this.project.sample ? this.project.project.files.find((f) => f.id === id) ?? null : null;
     this.bridge.post({
       type: 'openRef',
       fileId: id,
-      line: ref.line,
+      line: safeLine,
       ...(file ? { sample: { path: file.path, content: file.content, language: file.language } } : {}),
     });
+  }
+
+  /**
+   * Código del método de la función del paso `scriptIndex` del modo «Base de datos» (`Clase.método`), releído de los
+   * archivos reales; `null` si no se localiza.
+   */
+  async dbFnSnippet(scriptIndex: number): Promise<SnippetView | null> {
+    const flow = this.flow;
+    const view = this.dbView;
+    if (!flow || !view) return null;
+    const step = flow.steps[view.indexes[scriptIndex]];
+    const access = step ? view.accesses.get(step.id) : null;
+    if (!step || !access || !access.fn) return null;
+    const parts = access.fn.trim().replace(/\(\)\s*$/, '').split('.').filter(Boolean);
+    const method = parts[parts.length - 1] ?? '';
+    const className = parts.length > 1 ? parts[parts.length - 2] : '';
+    if (!method) return null;
+    const matches = (r: CodeRef | null | undefined): r is CodeRef =>
+      !!r && r.functionName === method && (!className || r.className === className);
+    let hint: CodeRef | null = null;
+    let hintStepId: string | null = null;
+    const pool: { ref: CodeRef | null | undefined; stepId: string }[] = [
+      { ref: step.ref, stepId: step.id },
+      { ref: step.snippet?.ref, stepId: step.id },
+      ...flow.steps.filter((s) => s !== step).flatMap((s) => [{ ref: s.ref, stepId: s.id }, { ref: s.snippet?.ref, stepId: s.id }]),
+    ];
+    for (const p of pool) {
+      if (matches(p.ref)) {
+        hint = p.ref;
+        hintStepId = p.stepId;
+        break;
+      }
+    }
+    if (!hint) hint = step.ref ?? null;
+    const found = await (await this.validator()).methodSnippet(className, method, hint);
+    if (found) return found;
+    if (hint && hintStepId && hint.functionName === method) {
+      const fallback = this.snippets.get(hintStepId);
+      if (fallback && fallback.lines.length && fallback.fileId) return fallback;
+    }
+    return null;
   }
 
   /* ---------------------------- Simular cambios ---------------------------- */

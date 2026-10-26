@@ -97,18 +97,31 @@ A la izquierda, el diff del cambio propuesto. A la derecha, **Simular cambios** 
 ### En el chat: `@nexo`
 
 - `@nexo ¿cómo funciona el registro?` (o `@nexo /flujo …`): genera el flujo y abre el panel.
+- `@nexo ¿qué ocurre si pongo una contraseña incorrecta?`: si la pregunta plantea un escenario, el chat muestra un resumen del escenario (qué ve el usuario, en qué paso y archivo falla, conclusión), una lista corta de pasos y el botón **Visualizar flujo**, que reabre ese flujo concreto (de los 10 últimos de la sesión). Nexo busca en las carpetas que tengas abiertas en VS Code en ese momento; si la pregunta nombra una de ellas («… en *&lt;carpeta&gt;*»), solo usa esa.
 - `@nexo /cambio valida que el email no esté vacío`: propone un cambio sobre el flujo abierto y lo lleva a **Simular cambios**.
 - Los archivos que adjuntes con `#archivo` se usan como pista prioritaria.
 
 ### En modo agente: `#nexoFlujo`
 
-En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pago?») y el agente llamará a Nexo por su cuenta, o nómbralo con `#nexoFlujo`. VS Code pide confirmación, se abre el panel y el agente recibe los pasos en texto para su respuesta. La herramienta no modifica archivos.
+En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pago?») y el agente llamará a Nexo por su cuenta, o nómbralo con `#nexoFlujo`. VS Code pide confirmación (ahora también muestra la carpeta elegida), se abre el panel y el agente recibe los pasos en texto para su respuesta. La herramienta no modifica archivos.
+
+- Se elige sola ante preguntas de escenario («¿qué pasa si…?», «what happens if…?»: contraseña incorrecta, sin sesión, sin permiso, registro inexistente…). El panel se abre en **Simular datos** con el escenario reproducido.
+- La respuesta del agente termina con un enlace **Visualizar flujo** (`vscode://nexo-local.nexo-vscode/show?id=…`) que se puede pulsar; VS Code puede pedir permiso para abrir la URI la primera vez.
+- En un workspace con varias carpetas, el agente puede pasar `project` (o nombrarla en la pregunta) para limitar el análisis a esa carpeta.
+
+### Copilot sin @nexo
+
+- Nexo contribuye instrucciones a Copilot Chat para las preguntas sobre flujos y procesos del proyecto.
+- En sesiones «Local» (modo Agent) Copilot puede llamar a `#nexoFlujo` aunque no escribas `@nexo`.
+- En otras sesiones (p. ej. Copilot CLI, donde las tools de extensiones pueden no estar disponibles) Copilot puede terminar la respuesta con un enlace «Visualizar flujo» (`vscode://nexo-local.nexo-vscode/flow?q=…`) que genera el flujo tras pedir confirmación.
+- Lo decide el modelo, así que no está garantizado al 100 %. Se desactiva con `nexo.copilotInstructions: false`; en versiones de VS Code sin `chatInstructions` no se aplica.
 
 ### Desde un enlace
 
 - Formato: `vscode://nexo-local.nexo-vscode/flow?q=<pregunta codificada con encodeURIComponent>`, con `&mode=sim|logs|db` opcional (`db` abre Recorrido si no hay conexión a la base de datos).
 - Ejemplo: `vscode://nexo-local.nexo-vscode/flow?q=%C2%BFC%C3%B3mo%20funciona%20el%20login%3F&mode=sim`
 - VS Code y Nexo siempre piden confirmación antes de enviar código al modelo, y no se modifica ningún archivo. Solo se procesa un enlace a la vez.
+- `vscode://nexo-local.nexo-vscode/show?id=<id del flujo>`: reabre un flujo ya generado en la sesión actual (de los 10 últimos). No usa IA, no envía datos y no pide confirmación; si el id no está en la sesión, avisa de que hay que volver a generarlo.
 
 ### Comandos
 
@@ -118,6 +131,7 @@ En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pag
 | **Nexo: Flujo** | Abre un `*.flow.json` (también con el botón Nexo de la barra del editor). |
 | **Nexo: Proponer cambio** | Pide a la IA un cambio sobre el flujo abierto. |
 | **Nexo: Mostrar último flujo generado** | Vuelve a abrir el último flujo. |
+| **Nexo: Visualizar flujo** | Lo usan el botón del chat y el enlace `/show`; abre un flujo generado en la sesión (oculto en la paleta). |
 | **Nexo: Abrir flujo de ejemplo** | Un flujo de demostración para probar el panel. |
 | **Nexo: Elegir modelo** | Cambia el modelo de IA que usa Nexo. |
 | **Nexo: Añadir / Contraseña / Probar / Quitar conexión de base de datos** | Gestiona conexiones PostgreSQL, MySQL o MariaDB para ver el esquema real. |
@@ -128,6 +142,12 @@ En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pag
 - La contraseña va al almacén seguro de VS Code (SecretStorage), nunca a los ajustes.
 - Solo se lee metadata (tablas, columnas y claves) en modo solo lectura. Nunca se leen filas ni se ejecuta SQL generado por la IA.
 - Sin TLS solo se admite `localhost`.
+
+### Apariencia (`nexo.theme`)
+
+- `nexo` (por defecto): paleta y fuentes originales de Nexo, oscura o clara según el tema de VS Code.
+- `vscode`: sigue los colores y fuentes del tema de VS Code.
+- El cambio se aplica en caliente en el panel abierto, sin recargar.
 
 ---
 

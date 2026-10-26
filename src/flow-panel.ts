@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import type { BridgeRequest, HostToWebview, NexoLanguage, NotifyLevel } from '../webview/src/app/bridge/protocol';
-import type { HostAi } from './host-ai';
+import type { BridgeRequest, HostToWebview, NexoLanguage, NexoTheme, NotifyLevel } from '../webview/src/app/bridge/protocol';
+import type { GeneratedFlow, HostAi } from './host-ai';
 import { HostDb } from './host-db';
 import { applyFiles, listFiles, openRef, readFile, readMountFile } from './host-files';
 import { guardMessage } from './host-guards';
@@ -22,13 +22,14 @@ export interface FlowPayload {
   mode?: 'walk' | 'sim' | 'logs' | 'db' | 'changes';
 }
 
-function nexoConfig(): { language: NexoLanguage; modelName: string | null } {
+function nexoConfig(): { language: NexoLanguage; modelName: string | null; theme: NexoTheme } {
   const config = vscode.workspace.getConfiguration('nexo');
   const language = config.get<string>('language') === 'en' ? 'en' : 'es';
+  const theme: NexoTheme = config.get<string>('theme') === 'vscode' ? 'vscode' : 'nexo';
   const raw = config.get<unknown>('model');
   const o = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
   const pick = (key: string): string | null => (typeof o[key] === 'string' && (o[key] as string).trim() ? (o[key] as string).trim().slice(0, 120) : null);
-  return { language, modelName: pick('id') ?? pick('family') };
+  return { language, modelName: pick('id') ?? pick('family'), theme };
 }
 
 function openFlowMessage(payload: FlowPayload): HostToWebview {
@@ -78,6 +79,18 @@ export class FlowPanel {
     });
     FlowPanel.current = new FlowPanel(panel, ai, distUri, payload);
     FlowPanel.current.post(openFlowMessage(payload));
+  }
+
+  /**
+   * Abre un flujo generado: con escenario se abre el escenario (sin `mode`); si se pidió un escenario y el modelo no lo
+   * devolvió, en «Simular»; en otro caso, «Recorrido».
+   */
+  static showGenerated(context: vscode.ExtensionContext, ai: HostAi, generated: GeneratedFlow): void {
+    const hasScenario = !!generated.flow['scenario'];
+    FlowPanel.show(context, ai, {
+      flow: generated.flow, sample: false, title: generated.title, proposals: [], source: { model: generated.model },
+      ...(generated.scenarioAsked && !hasScenario ? { mode: 'sim' as const } : {}),
+    });
   }
 
   /** Flujo abierto en el panel (sin el de ejemplo) y sus propuestas; `null` si no hay panel o es el ejemplo. */

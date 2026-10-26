@@ -1,5 +1,6 @@
-import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, HostBinding, Input, NgZone, OnChanges, OnDestroy, SimpleChanges, ViewChild } from '@angular/core';
+import { AfterViewInit, ChangeDetectorRef, Component, ElementRef, EventEmitter, HostBinding, Input, NgZone, OnChanges, OnDestroy, Output, SimpleChanges, ViewChild } from '@angular/core';
 import { Subscription } from 'rxjs';
+import { SnippetView } from '../ai/nexo-ia.types';
 import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
 import { WorkspaceCodeDbExplainService } from '../services/workspace-code-db-explain.service';
 import { WorkspaceCodeNotifyService } from '../services/workspace-code-notify.service';
@@ -34,6 +35,15 @@ const BALLOON_H_EST = 150;
 const BALLOON_GAP = 14;
 const ACTOR_H = 30;
 const ACTOR_UP = 84;
+/** Píldora de la función (conducida): alto, ancho mínimo y máximo, ancho estimado por carácter y espacio de iconos y padding. */
+const FN_ACTOR_H = 38;
+const FN_ACTOR_MIN_W = 240;
+const FN_ACTOR_MAX_W = 320;
+const FN_CHAR_W = 7.3;
+const FN_ACTOR_CHROME = 70;
+/** Popover con el código del método: ancho máximo y alto mínimo disponible. */
+const CODE_POP_W = 460;
+const CODE_POP_MIN_H = 140;
 const EXPLAIN_PAD_X = 24;
 const EXPLAIN_PAD_TOP = 70;
 const EXPLAIN_PAD_BOTTOM = 96;
@@ -219,6 +229,10 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   @Input() flowScript: DbExplainScript | null = null;
   @Input() flowIndex = 0;
   @Input() flowSpeed = 1;
+  /** Busca el código del método de la píldora del paso `scriptIndex` (modo conducido). Sin él, la píldora no es un botón. */
+  @Input() fnCodeLoader: ((scriptIndex: number) => Promise<SnippetView | null>) | null = null;
+  /** El usuario pide abrir en el editor el fragmento del método mostrado en el popover. */
+  @Output() fnCodeOpen = new EventEmitter<SnippetView>();
 
   @HostBinding('class.is-compact') get hostCompact(): boolean { return this.compact; }
 
@@ -306,6 +320,8 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   actionError: string | null = null;
   /** Explicación animada en curso (solo en el diagrama completo, nunca en el compacto). */
   explain: ExplainState | null = null;
+  /** Popover con el código del método de la píldora de la función. */
+  fnCode: { fn: string; status: 'loading' | 'ready' | 'empty'; view: SnippetView | null } | null = null;
   readonly reducedMotion = typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
   private subs = new Subscription();
@@ -328,6 +344,7 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   private suppressClick = false;
   private layoutVersion = 0;
   private explainToken = 0;
+  private fnCodeToken = 0;
   private flowCache: { key: string; flow: XFlow | null } | null = null;
   private actorCache: { key: string; list: XActor[] } | null = null;
   /** Alto medido del globo del paso actual y escala con que se midió (solo crece dentro de un mismo paso y escala). */
@@ -363,9 +380,11 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
       this.selectedEdge = null;
       this.popAt = null;
       this.actionError = null;
+      this.closeFnCode(false);
       this.dropExplain();
       this.rebuild();
     }
+    if (!structural && ('flowScript' in changes || 'flowIndex' in changes)) this.closeFnCode(false);
     // El guion conducido sigue al reproductor del flujo sin reconstruir el diagrama.
     if (structural || 'flowScript' in changes) this.syncDriven(true);
     else if ('flowIndex' in changes || 'flowSpeed' in changes) this.syncDriven(false);
@@ -376,6 +395,10 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
       const key = (event: KeyboardEvent) => this.onGlobalKey(event);
       const outside = (event: PointerEvent) => {
         if (this.selectedEdge && !this.host.nativeElement.contains(event.target as Node)) this.zone.run(() => this.closeRelation());
+        if (this.fnCode) {
+          const target = event.target instanceof Element ? event.target : null;
+          if (!target?.closest('.wtd-codepop, .wtd-xactor.is-fn')) this.zone.run(() => this.closeFnCode(false));
+        }
       };
       window.addEventListener('keydown', key);
       document.addEventListener('pointerdown', outside, true);
@@ -385,6 +408,7 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
 
   ngOnDestroy(): void {
     this.destroyed = true;
+    this.fnCodeToken++;
     this.balloonObserver?.disconnect();
     this.balloonObserver = null;
     this.balloonEl = null;
@@ -410,6 +434,10 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   private onGlobalKey(event: KeyboardEvent): void {
     const ex = this.explain;
     if (event.key === 'Escape') {
+      if (this.fnCode) {
+        this.zone.run(() => this.closeFnCode(true));
+        return;
+      }
       if (ex && !ex.driven) this.zone.run(() => this.exitExplain());
       else if (this.selectedEdge) this.zone.run(() => this.closeRelation());
       return;
@@ -1081,6 +1109,67 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
     this.cdr.markForCheck();
   }
 
+  /** Nombre `Clase.método` de la función del paso conducido actual (sin `()`). */
+  get fnCodeName(): string {
+    return this.explain?.player.step?.fn ?? '';
+  }
+
+  /** La píldora de la función es un botón: hay cargador, explicación conducida y el paso actual tiene función. */
+  get fnCodeClickable(): boolean {
+    return !!this.fnCodeLoader && !!this.explain?.driven && !!this.explain.player.step?.fn;
+  }
+
+  /** Abre o cierra el popover con el código del método de la píldora. */
+  toggleFnCode(event: Event): void {
+    event.stopPropagation();
+    if (this.fnCode) {
+      this.closeFnCode(true);
+      return;
+    }
+    const ex = this.explain;
+    const loader = this.fnCodeLoader;
+    const fn = ex?.player.step?.fn;
+    if (!ex || !loader || !fn || !ex.driven) return;
+    this.closeRelation();
+    const token = ++this.fnCodeToken;
+    this.fnCode = { fn, status: 'loading', view: null };
+    const done = (view: SnippetView | null) => {
+      if (token !== this.fnCodeToken || this.destroyed || !this.fnCode) return;
+      this.fnCode = view?.lines.length ? { fn, status: 'ready', view } : { fn, status: 'empty', view: null };
+      this.cdr.markForCheck();
+    };
+    // Un fallo del cargador se muestra como «sin código», no como error de la vista.
+    loader(ex.player.index).then(done, () => done(null));
+    this.cdr.markForCheck();
+    setTimeout(() => {
+      if (token === this.fnCodeToken && !this.destroyed) this.host.nativeElement.querySelector<HTMLElement>('.wtd-codepop__close')?.focus({ preventScroll: true });
+    });
+  }
+
+  /** Cierra el popover del código; `restoreFocus` devuelve el foco a la píldora. Descarta una carga en curso. */
+  closeFnCode(restoreFocus: boolean): void {
+    this.fnCodeToken++;
+    if (!this.fnCode) return;
+    this.fnCode = null;
+    this.cdr.markForCheck();
+    if (restoreFocus && !this.destroyed) this.host.nativeElement.querySelector<HTMLElement>('.wtd-xactor.is-fn')?.focus({ preventScroll: true });
+  }
+
+  /** Posición del popover: justo debajo de la píldora de la función, dentro del lienzo y con el alto disponible. */
+  get codePopStyle(): Record<string, string> {
+    const el = this.canvasEl;
+    const a = this.xActors.find((x) => x.id === ACTOR_API);
+    if (!el || !a) return {};
+    const cw = el.clientWidth;
+    const ch = el.clientHeight;
+    const z = this.view.z;
+    const pw = Math.min(CODE_POP_W, cw - 16);
+    const cx = this.view.x + (a.x + a.w / 2) * z;
+    const left = Math.min(Math.max(cx - pw / 2, 8), Math.max(8, cw - pw - 8));
+    const top = Math.min(Math.max(this.view.y + (a.y + a.h) * z + 8, 8), Math.max(8, ch - CODE_POP_MIN_H));
+    return { left: `${left}px`, top: `${top}px`, width: `${pw}px`, maxHeight: `${Math.max(CODE_POP_MIN_H - 16, ch - top - 8)}px` };
+  }
+
   cardinalityKey(r: TdRelation): string {
     return 'dbw.rel.' + relationCardinality(this.tableOf(r.src), r.srcCols);
   }
@@ -1267,6 +1356,7 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   startExplain(name: string): void {
     if (this.compact || this.destroyed) return;
     this.closeRelation();
+    this.closeFnCode(false);
     const script = this.schema ? this.explainSvc.local(this.explainConn, name, this.schema) : this.explainSvc.local(this.connectionKey, name);
     if (!script || !script.steps.length) return;
     // Sustituye a la explicación conducida por el flujo (vuelve al salir).
@@ -1305,6 +1395,7 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   private dropExplain(): void {
     const ex = this.explain;
     if (!ex) return;
+    this.closeFnCode(false);
     ex.player.destroy();
     this.explain = null;
     this.explainToken++;
@@ -1435,7 +1526,9 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
       if (ex.driven) {
         // Conducida: una sola píldora, la función que hace la operación sobre la tabla.
         const label = step?.fn ? step.fn + '()' : this.i18n.t('dbw.explain.actor.api');
-        list = [{ id: ACTOR_API, label, title: label, icon: 'bi-braces', fn: true, x: d.x + NODE_W / 2 - 110, y: d.y - ACTOR_UP, w: 220, h: ACTOR_H, active: false }];
+        // Más grande que las demás: fuente mono 12px, alto 38px y ancho según la etiqueta (240–320px). El borde inferior no se mueve.
+        const w = Math.min(FN_ACTOR_MAX_W, Math.max(FN_ACTOR_MIN_W, Math.round(label.length * FN_CHAR_W + FN_ACTOR_CHROME)));
+        list = [{ id: ACTOR_API, label, title: label, icon: 'bi-braces', fn: true, x: d.x + NODE_W / 2 - w / 2, y: d.y - ACTOR_UP - (FN_ACTOR_H - ACTOR_H), w, h: FN_ACTOR_H, active: false }];
       } else list = [
         { id: ACTOR_APP, label: this.i18n.t('dbw.explain.actor.app'), icon: 'bi-window', x: d.x - 40, y: d.y - ACTOR_UP, w: 104, h: ACTOR_H, active: false },
         { id: ACTOR_API, label: this.i18n.t('dbw.explain.actor.api'), icon: 'bi-hdd-network', x: d.x + NODE_W - 82, y: d.y - ACTOR_UP, w: 136, h: ACTOR_H, active: false },

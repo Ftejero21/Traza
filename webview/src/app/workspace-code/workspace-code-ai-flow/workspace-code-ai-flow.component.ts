@@ -14,6 +14,7 @@ import {
   ResultKind,
   SimulationPreset,
   SimulationResult,
+  SnippetView,
 } from '../ai/nexo-ia.types';
 import { functionLabel, isDecoratorFunctionName, refSymbolLabel } from '../ai/workspace-code-flow-ref-validator';
 import { FlowStatusPill, SavedResultPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
@@ -287,6 +288,9 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   get dbFlowIndex(): number {
     return Math.max(0, this.flowService.dbView?.indexes.indexOf(this.step) ?? 0);
   }
+
+  /** Cargador del código del método para el popover de la píldora del diagrama (referencia estable). */
+  readonly dbFnCodeLoader = (i: number): Promise<SnippetView | null> => this.flowService.dbFnSnippet(i);
 
   private allIndexes: number[] = [];
 

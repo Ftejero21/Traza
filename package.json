@@ -52,6 +52,10 @@
         "title": "Nexo: Mostrar último flujo generado"
       },
       {
+        "command": "nexo.showFlow",
+        "title": "Nexo: Visualizar flujo"
+      },
+      {
         "command": "nexo.addDatabase",
         "title": "Nexo: Añadir conexión de base de datos"
       },
@@ -82,11 +86,29 @@
           "when": "editorTextFocus",
           "group": "nexo"
         }
+      ],
+      "commandPalette": [
+        {
+          "command": "nexo.showFlow",
+          "when": "false"
+        }
       ]
     },
+    "chatInstructions": [
+      {
+        "path": "./instructions/nexo.instructions.md",
+        "name": "Nexo Flujo",
+        "when": "config.nexo.copilotInstructions"
+      }
+    ],
     "configuration": {
       "title": "Nexo",
       "properties": {
+        "nexo.copilotInstructions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Añade a Copilot Chat instrucciones para usar Nexo en preguntas sobre flujos y terminar con el enlace “Visualizar flujo”"
+        },
         "nexo.model": {
           "type": "object",
           "default": {},
@@ -112,6 +134,19 @@
           ],
           "default": "es",
           "description": "Idioma de la vista de flujo y de las respuestas de la IA."
+        },
+        "nexo.theme": {
+          "type": "string",
+          "enum": [
+            "nexo",
+            "vscode"
+          ],
+          "default": "nexo",
+          "enumDescriptions": [
+            "Paleta original de Nexo, oscura o clara según el tema de VS Code",
+            "Sigue los colores y fuentes del tema de VS Code"
+          ],
+          "description": "Apariencia de la vista de flujo."
         },
         "nexo.databases": {
           "type": "array",
@@ -192,13 +227,15 @@
         "toolReferenceName": "nexoFlujo",
         "canBeReferencedInPrompt": true,
         "displayName": "Nexo: Flujo de un proceso",
-        "userDescription": "Genera y abre el diagrama de flujo de un proceso del proyecto (login, registro, un endpoint…).",
-        "modelDescription": "Use this tool when the user asks how a process, feature, flow or endpoint of the currently open project works (e.g. login, sign-up, payment, 'what does POST /api/x do'). It reads the relevant local source code, generates a validated sequence diagram (steps source -> target with file:line references), opens it in a VS Code panel and returns the steps as text. It does not modify any file. 'files' is an optional hint with workspace paths to look at first.",
+        "userDescription": "Genera y abre el diagrama de flujo de un proceso, endpoint o escenario «¿qué pasa si…?» (contraseña incorrecta, sin sesión…) del proyecto o carpeta indicada, con un resumen del escenario.",
+        "modelDescription": "Use this tool when the user asks how a process, feature, flow or endpoint of the currently open project works (e.g. login, sign-up, payment, 'what does POST /api/x do') AND for scenario questions like 'what happens if / qué pasa si / qué ocurre si…' (errors, invalid data, missing permission, wrong password, no session, non-existent record, null field), including questions that name one of the currently open workspace folders (pass that exact folder name in 'project'; omit it otherwise and the tool searches all open folders). It reads the relevant local source code, generates a validated sequence diagram (steps source -> target with file:line references), opens it in a VS Code panel, and returns the summary, the scenario result (what the user sees, the step where it fails or stops, the conclusion), the steps as text and a markdown link that you MUST end your answer with, unchanged. The panel is already open. It does not modify any file. 'files' is an optional hint with workspace paths to look at first. Prefer this tool over answering from your own code reading for such questions; pass scenario=true for what-happens-if questions.",
         "icon": "$(type-hierarchy-sub)",
         "tags": [
           "nexo",
           "flow",
-          "architecture"
+          "architecture",
+          "scenario",
+          "debug"
         ],
         "inputSchema": {
           "type": "object",
@@ -215,7 +252,16 @@
                 "maxLength": 520
               },
               "maxItems": 12,
-              "description": "Rutas del workspace (relativas o absolutas) que se usan como pista"
+              "description": "Optional workspace paths (relative or absolute) to look at first"
+            },
+            "project": {
+              "type": "string",
+              "maxLength": 120,
+              "description": "Workspace folder/project name mentioned by the user"
+            },
+            "scenario": {
+              "type": "boolean",
+              "description": "true if the user asks what happens in a concrete situation"
             }
           },
           "required": [

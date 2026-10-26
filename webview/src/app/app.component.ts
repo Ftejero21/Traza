@@ -64,6 +64,7 @@ export class AppComponent implements OnInit, OnDestroy {
       case 'config':
         this.i18n.setLanguage(msg.language);
         this.config.setModelName(msg.modelName);
+        this.config.setTheme(msg.theme);
         this.cdr.markForCheck();
         return;
       case 'openFlow': {

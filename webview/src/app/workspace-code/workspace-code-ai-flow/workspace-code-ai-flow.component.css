@@ -1,6 +1,6 @@
 :host { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; }
 
-.wcf { --wcf-mono: var(--vscode-editor-font-family, 'JetBrains Mono', 'Fira Code', Consolas, monospace); --wcf-title: var(--vscode-font-family, 'Inter', system-ui, sans-serif);
+.wcf { --wcf-mono: var(--wce-mono); --wcf-title: var(--wce-font-title);
   position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; background: var(--wce-editor-bg); color: var(--wce-text); font-size: 12.5px; outline: none; }
 .wcf:focus-visible { box-shadow: inset 0 0 0 1px var(--wce-accent-strong); }
 .wcf-none { flex: 1; display: grid; place-items: center; color: var(--wce-faint); font-size: 32px; }

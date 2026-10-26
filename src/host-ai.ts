@@ -57,6 +57,7 @@ const CACHE_TTL_MS = 15 * 60_000;
 const COMPARE_CONCURRENCY = 3;
 
 const MAX_STEPS = 20;
+const MAX_RECENT_FLOWS = 10;
 const MAX_WINDOWS = 24;
 const MAX_WINDOW_CHARS = 8000;
 const MAX_INPUT_CHARS = 20_000;
@@ -180,10 +181,18 @@ export interface GeneratedFlow {
   flow: Obj;
   title: string;
   model: string;
+  /** La pregunta planteaba un escenario («qué pasa si…»), lo devuelva o no el modelo. */
+  scenarioAsked?: boolean;
+  /** Carpeta del workspace a la que se limitó el contexto (multi-root). */
+  folder?: string;
 }
 
 export interface GenerateFlowOptions {
   question: string;
+  /** Nombre de carpeta del workspace a la que limitar el contexto (multi-root). */
+  folder?: string;
+  /** La pregunta plantea un escenario concreto: se pide a la IA el campo `scenario`. */
+  scenario?: boolean;
   model?: vscode.LanguageModelChat;
   pinned: PinnedRef[];
   useActiveEditor: boolean;
@@ -382,6 +391,7 @@ interface FlowTextInput {
   context: FlowContext;
   activeFlow?: string;
   lang: NexoLanguage;
+  scenarioHint?: boolean;
 }
 
 function composeFlowText(input: FlowTextInput, map: string, fragments: ContextFragment[], activeContent: string | null): string {
@@ -402,6 +412,7 @@ function composeFlowText(input: FlowTextInput, map: string, fragments: ContextFr
     if (selection?.text.trim()) sb += `## SELECCION (lineas ${selection.startLine}-${selection.endLine})\n${selection.text}\n\n`;
   }
   sb += `## PETICION (modo ${input.mode})\n${input.question}`;
+  if (input.mode === 'FLOW' && input.scenarioHint) sb += '\n\n(La pregunta plantea un escenario concreto: incluye "scenario" según la regla 9.)';
   return `${sb}\n\n${idiomaTail(input.lang)}`;
 }
 
@@ -568,6 +579,8 @@ export class HostAi {
   private readonly sources = new Map<string, vscode.CancellationTokenSource>();
   private readonly cache = new Map<string, { expires: number; value: unknown }>();
   private last: GeneratedFlow | null = null;
+  /** Últimos flujos generados (máx. 10, solo en memoria), para reabrirlos por id. */
+  private readonly recent = new Map<string, GeneratedFlow>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -579,6 +592,11 @@ export class HostAi {
   /** Último flujo generado (comando o `@nexo`), para «Abrir flujo». */
   get lastGenerated(): GeneratedFlow | null {
     return this.last;
+  }
+
+  /** Flujo generado en esta sesión por su id (de los últimos 10); `null` si no está. */
+  flowById(id: string): GeneratedFlow | null {
+    return this.recent.get(id) ?? null;
   }
 
   /* ------------------------------ modelo ------------------------------ */
@@ -1075,6 +1093,18 @@ export class HostAi {
     };
   }
 
+  private remember(generated: GeneratedFlow): void {
+    const id = generated.flow['id'];
+    if (typeof id !== 'string') return;
+    this.recent.delete(id);
+    this.recent.set(id, generated);
+    while (this.recent.size > MAX_RECENT_FLOWS) {
+      const oldest = this.recent.keys().next();
+      if (oldest.done) break;
+      this.recent.delete(oldest.value);
+    }
+  }
+
   /** Genera un `FlowDiagram` con el contexto local (mapa, selección de archivos, fragmentos y archivo activo). */
   async generateFlow(options: GenerateFlowOptions): Promise<GeneratedFlow> {
     const lang = language();
@@ -1089,12 +1119,13 @@ export class HostAi {
         question: maskSensitiveText(question),
         pinned: options.pinned,
         useActiveEditor: options.useActiveEditor,
+        ...(options.folder ? { folder: options.folder } : {}),
         token,
         progress: options.progress,
         selectFiles: (input) => this.selectFiles(model, input, token, lang),
       });
       options.progress?.(lang === 'en' ? 'Generating the flow…' : 'Generando el flujo…');
-      const build = fitFlowText({ mode: 'FLOW', question: maskSensitiveText(question), context, lang });
+      const build = fitFlowText({ mode: 'FLOW', question: maskSensitiveText(question), context, lang, scenarioHint: options.scenario === true });
       const run = await this.runJson('FLOW', systemFor('FLOW'), build, (root) => {
         dropInvalidScenario(root);
         const errors = validate('FlowDiagram', root);
@@ -1106,7 +1137,11 @@ export class HostAi {
       flow['generatedAt'] = new Date().toISOString();
       flow['question'] = question;
       const title = typeof flow['title'] === 'string' && flow['title'].trim() ? flow['title'].trim().slice(0, 60) : 'Sin título';
-      this.last = { flow, title, model: modelLabel(model) };
+      this.last = {
+        flow, title, model: modelLabel(model), scenarioAsked: options.scenario === true,
+        ...(options.folder ? { folder: options.folder } : {}),
+      };
+      this.remember(this.last);
       return this.last;
     } catch (error: unknown) {
       if (global.timedOut()) throw new AiError(t('timeout', lang));

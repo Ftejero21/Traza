@@ -10,7 +10,8 @@ interface SnippetRow {
 
 /**
  * Fragmento de código de Nexo IA releído del archivo real. El resaltado sale de un tokenizer propio que produce
- * spans (sin `innerHTML` ni Monaco `colorize`). Las referencias no verificadas muestran un aviso y no se abren.
+ * spans (sin `innerHTML` ni Monaco `colorize`). Las referencias no verificadas muestran un aviso y, si el archivo se
+ * pudo leer (`fileId`), también el código y «Abrir en el editor» (línea aproximada).
  */
 @Component({
   selector: 'app-workspace-code-ai-snippet',
@@ -47,7 +48,7 @@ export class WorkspaceCodeAiSnippetComponent implements OnChanges {
   }
 
   get openable(): boolean {
-    return this.canOpen && !!this.view?.fileId && this.view.verification !== 'unverified';
+    return this.canOpen && !!this.view?.fileId;
   }
 
   trackRow = (_: number, row: SnippetRow) => row.number;
