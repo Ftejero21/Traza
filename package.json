@@ -4,8 +4,22 @@
   "description": "Visualización del flujo de un proceso del proyecto (diagrama de secuencia, simular datos, analizar logs y proponer cambios) con el modelo de lenguaje que ya usas en VS Code. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.",
   "publisher": "ftejero21",
   "version": "0.1.0",
-  "private": true,
-  "license": "UNLICENSED",
+  "license": "MIT",
+  "author": {
+    "name": "Fernando Tejero"
+  },
+  "preview": true,
+  "icon": "media/icon.png",
+  "galleryBanner": {
+    "color": "#0d1220",
+    "theme": "dark"
+  },
+  "homepage": "https://github.com/Ftejero21/Traza#readme",
+  "bugs": {
+    "url": "https://github.com/Ftejero21/Traza/issues"
+  },
+  "qna": "marketplace",
+  "pricing": "Free",
   "repository": {
     "type": "git",
     "url": "https://github.com/Ftejero21/Traza.git"
@@ -14,9 +28,44 @@
     "vscode": "^1.95.0"
   },
   "categories": [
-    "Visualization",
-    "Other"
+    "AI",
+    "Chat",
+    "Visualization"
   ],
+  "keywords": [
+    "flow",
+    "sequence diagram",
+    "diagrama de secuencia",
+    "flujo",
+    "copilot",
+    "chat",
+    "ai",
+    "angular",
+    "spring",
+    "spring boot",
+    "debugging",
+    "simulación",
+    "logs",
+    "database",
+    "architecture",
+    "traza"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "En espacios de trabajo no confiables, Traza no usa las conexiones de base de datos definidas en la configuración del workspace (traza.databases); solo las de la configuración de usuario. Traza no ejecuta código del proyecto.",
+      "restrictedConfigurations": [
+        "traza.databases"
+      ]
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Lee el código mediante el sistema de archivos de VS Code; la conexión a bases de datos y VS Code para la Web no están soportados."
+    }
+  },
   "main": "./dist/extension.js",
   "activationEvents": [
     "onChatParticipant:traza.flow",
@@ -297,7 +346,10 @@
     "build": "npm run build:webview && npm run build:host",
     "watch:host": "npm run build:host -- --watch",
     "serve:webview": "npm --prefix webview start",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "vscode:prepublish": "npm run build",
+    "package": "vsce package --no-dependencies",
+    "package:ls": "vsce ls --no-dependencies"
   },
   "dependencies": {
     "mysql2": "^3.9.7",
@@ -307,7 +359,11 @@
     "@types/node": "^18.19.0",
     "@types/pg": "^8.11.6",
     "@types/vscode": "~1.95.0",
+    "@vscode/vsce": "2.32.0",
     "esbuild": "^0.20.2",
     "typescript": "~5.4.2"
+  },
+  "overrides": {
+    "cheerio": "1.0.0-rc.12"
   }
 }

@@ -1,6 +1,14 @@
-webview/**
+.vscode/**
+.gitignore
 src/**
+webview/**
 node_modules/**
 **/*.map
-.vscode/**
-tsconfig.json
+**/tsconfig*.json
+*.vsix
+package-lock.json
+media/*.webp
+media/*.png
+!media/icon.png
+media/icon.svg
+samples/*.code-workspace

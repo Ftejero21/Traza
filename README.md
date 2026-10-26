@@ -165,8 +165,8 @@ Traza es el nuevo nombre de la extensión «Nexo Flujo» (id `ftejero21.traza`).
 
 ## Requisitos
 
-- **VS Code 1.95 o superior.** El modo agente requiere una versión de VS Code y de Copilot con herramientas de agente.
-- **Un modelo de lenguaje en VS Code**: GitHub Copilot, Claude, GPT o BYOK. Se guarda en el ajuste `traza.model`; si está vacío, se elige al usarlo.
+- **VS Code 1.95 o superior.** Traza se publica como **Preview**. El modo agente requiere una versión de VS Code y de Copilot con herramientas de agente.
+- **Un modelo de lenguaje en VS Code** (p. ej. GitHub Copilot) con Claude, GPT o BYOK. Se guarda en el ajuste `traza.model`; si está vacío, se elige al usarlo.
 - **Una carpeta del proyecto abierta.**
 
 ---
@@ -205,3 +205,7 @@ Un `*.flow.json` tiene la forma `{ "flow": FlowDiagram, "proposals"?: [...] }`. 
 Límites: 2 MB y 10 propuestas. Ejemplo completo: [samples/freesocial-login.flow.json](https://github.com/Ftejero21/Traza/blob/main/samples/freesocial-login.flow.json).
 
 <p align="center"><sub>Las capturas son del proyecto de ejemplo FreeSocial (Angular + Spring Boot) con Claude a través de GitHub Copilot.</sub></p>
+
+## Licencia
+
+MIT © 2026 Fernando Tejero — ver [LICENSE](https://github.com/Ftejero21/Traza/blob/main/LICENSE).
