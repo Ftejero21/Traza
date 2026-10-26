@@ -1,4 +1,4 @@
-<div class="wcf" #root tabindex="0" (keydown)="onKeydown($event)" [class.is-narrow]="narrow" [class.is-changes]="flowService.ui.mode === 'changes'" [class.is-db]="flowService.ui.mode === 'db'"
+<div class="wcf" #root tabindex="0" (keydown)="onKeydown($event)" [class.is-narrow]="narrow" [class.is-changes]="flowService.ui.mode === 'changes'" [class.is-changes-fixed]="flowService.ui.mode === 'changes' && flowService.ui.labHeight !== null"[class.is-db]="flowService.ui.mode === 'db'"
   [ngStyle]="{ '--wcf-k': timeFactor }" *ngIf="flow as f; else noFlow">
   <!-- Cabecera -->
   <header class="wcf__head">
@@ -16,7 +16,7 @@
   <!-- Modos -->
   <div class="wcf__modes" role="tablist" [attr.aria-label]="'pages.aiFlow' | wcT">
     <button *ngFor="let m of modes" type="button" role="tab" class="wcf__mode" [class.is-on]="flowService.ui.mode === m.id"
-      [attr.aria-selected]="flowService.ui.mode === m.id" (click)="flowService.setMode(m.id)">
+      [attr.aria-selected]="flowService.ui.mode === m.id" (click)="selectMode(m.id)">
       <i class="bi" [ngClass]="m.icon" aria-hidden="true"></i>{{ m.key | wcT }}
     </button>
   </div>
@@ -236,7 +236,12 @@
     </ng-container>
 
     <!-- Simular cambios: diff propuesto y comparación antes / después -->
-    <app-workspace-code-ai-changes *ngIf="flowService.ui.mode === 'changes'" class="wcf__changes" [narrow]="narrow"></app-workspace-code-ai-changes>
+    <ng-container *ngIf="flowService.ui.mode === 'changes'">
+      <div class="wcf__split" role="separator" aria-orientation="horizontal" [attr.aria-label]="'aiFlow.resize' | wcT"
+        (pointerdown)="startDrag($event)" (dblclick)="resetLab()"><span></span></div>
+      <app-workspace-code-ai-changes #changes class="wcf__changes" [class.is-fixed]="flowService.ui.labHeight !== null"
+        [style.height.px]="flowService.ui.labHeight" [narrow]="narrow"></app-workspace-code-ai-changes>
+    </ng-container>
 
     <!-- Simular datos / Analizar logs: validador -->
     <ng-container *ngIf="flowService.ui.mode === 'sim' || flowService.ui.mode === 'logs'">

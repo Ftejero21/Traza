@@ -276,8 +276,8 @@
         "toolReferenceName": "trazaFlujo",
         "canBeReferencedInPrompt": true,
         "displayName": "Traza: Flujo de un proceso",
-        "userDescription": "Genera y abre el diagrama de flujo de un proceso, endpoint o escenario «¿qué pasa si…?» (contraseña incorrecta, sin sesión…) del proyecto o carpeta indicada, con un resumen del escenario.",
-        "modelDescription": "Use this tool when the user asks how a process, feature, flow or endpoint of the currently open project works (e.g. login, sign-up, payment, 'what does POST /api/x do') AND for scenario questions like 'what happens if / qué pasa si / qué ocurre si…' (errors, invalid data, missing permission, wrong password, no session, non-existent record, null field), including questions that name one of the currently open workspace folders (pass that exact folder name in 'project'; omit it otherwise and the tool searches all open folders). It reads the relevant local source code, generates a validated sequence diagram (steps source -> target with file:line references), opens it in a VS Code panel, and returns the summary, the scenario result (what the user sees, the step where it fails or stops, the conclusion), the steps as text and a markdown link that you MUST end your answer with, unchanged. The panel is already open. It does not modify any file. 'files' is an optional hint with workspace paths to look at first. Prefer this tool over answering from your own code reading for such questions; pass scenario=true for what-happens-if questions.",
+        "userDescription": "Genera y abre el diagrama de flujo de un proceso, endpoint o escenario «¿qué pasa si…?» (contraseña incorrecta, sin sesión…) del proyecto o carpeta indicada, con un resumen del escenario. También propone cambios de código o UI del proyecto (p. ej. «cambia el fondo del toast a rojo»): genera o reutiliza el flujo y abre la propuesta en «Simular cambios» sin modificar ningún archivo.",
+        "modelDescription": "Use this tool when the user asks how a process, feature, flow or endpoint of the currently open project works (e.g. login, sign-up, payment, 'what does POST /api/x do') AND for scenario questions like 'what happens if / qué pasa si / qué ocurre si…' (errors, invalid data, missing permission, wrong password, no session, non-existent record, null field), including questions that name one of the currently open workspace folders (pass that exact folder name in 'project'; omit it otherwise and the tool searches all open folders). It reads the relevant local source code, generates a validated sequence diagram (steps source -> target with file:line references), opens it in a VS Code panel, and returns the summary, the scenario result (what the user sees, the step where it fails or stops, the conclusion), the steps as text and a markdown link that you MUST end your answer with, unchanged. The panel is already open. It does not modify any file. ALSO use it when the user asks to change, add, remove or fix something in the project (code or UI, e.g. 'make the wrong-password toast background red'): pass 'question' (the affected process or feature, in the user's words) and 'change' (the user's request, verbatim); Traza then generates or reuses the related flow, proposes the change, opens it in the 'Simular cambios' (before/after) tab and returns a summary of the proposal and a link to end your answer with. In that case it is simulation only: no file is modified and you must not edit files yourself unless the user explicitly asks to apply the change directly. 'files' is an optional hint with workspace paths to look at first. Prefer this tool over answering from your own code reading for such questions; pass scenario=true for what-happens-if questions.",
         "icon": "$(type-hierarchy-sub)",
         "tags": [
           "traza",
@@ -311,6 +311,11 @@
             "scenario": {
               "type": "boolean",
               "description": "true if the user asks what happens in a concrete situation"
+            },
+            "change": {
+              "type": "string",
+              "maxLength": 4000,
+              "description": "The user's change request, verbatim (e.g. 'make the wrong-password toast background red'). When present, Traza generates or reuses the related flow, proposes the change and opens it in «Simular cambios» (simulation only, no file is modified)."
             }
           },
           "required": [
@@ -325,7 +330,7 @@
         "id": "traza.flow",
         "name": "traza",
         "fullName": "Traza",
-        "description": "Genera el flujo de un proceso del proyecto",
+        "description": "Genera el flujo de un proceso del proyecto y propone cambios",
         "isSticky": false,
         "commands": [
           {
@@ -334,7 +339,7 @@
           },
           {
             "name": "cambio",
-            "description": "Proponer un cambio sobre el flujo abierto"
+            "description": "Proponer un cambio (genera el flujo si hace falta) y abrirlo en «Simular cambios»"
           }
         ]
       }

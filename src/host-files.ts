@@ -5,7 +5,7 @@ import { codeExtension, isBinaryCodeExtension, isSensitiveCodeFile, normalizeCod
 const MAX_FILES = 20_000;
 const MAX_TEXT_BYTES = 3 * 1024 * 1024;
 const MAX_BASE64_BYTES = 3 * 1024 * 1024;
-const EXCLUDE = '{**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/out/**,**/.git/**,**/.angular/**,**/coverage/**,**/.next/**}';
+const EXCLUDE = '{**/node_modules/**,**/dist/**,**/build/**,**/target/**,**/out/**,**/.git/**,**/.angular/**,**/coverage/**,**/.next/**,**/.m2/**,**/.gradle/**,**/.venv/**,**/venv/**,**/.pnpm-store/**,**/.cache/**,**/.vscode-test/**,**/__pycache__/**}';
 
 /** Lenguajes de los archivos virtuales del ejemplo → id de lenguaje de VS Code. */
 const SAMPLE_LANGUAGES: Record<string, string> = {

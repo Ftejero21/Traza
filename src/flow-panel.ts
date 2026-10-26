@@ -94,16 +94,20 @@ export class FlowPanel {
   }
 
   /** Flujo abierto en el panel (sin el de ejemplo) y sus propuestas; `null` si no hay panel o es el ejemplo. */
-  static currentFlow(): { flow: unknown; proposals: unknown[] } | null {
+  static currentFlow(): { flow: unknown; title: string; proposals: unknown[] } | null {
     const current = FlowPanel.current;
     if (!current || current.payload.sample || !current.payload.flow) return null;
-    return { flow: current.payload.flow, proposals: [...current.payload.proposals] };
+    return { flow: current.payload.flow, title: current.payload.title, proposals: [...current.payload.proposals] };
   }
 
   /** Añade una propuesta al flujo abierto y abre «Simular cambios» (re-envía `openFlow` con las acumuladas, máx. 10). */
   static addProposal(proposal: unknown): boolean {
     const current = FlowPanel.current;
     if (!current || current.payload.sample || !current.payload.flow) return false;
+    const proposalFlowId = proposal && typeof proposal === 'object' ? (proposal as { flowId?: unknown }).flowId : undefined;
+    const flowObj = current.payload.flow;
+    const panelFlowId = flowObj && typeof flowObj === 'object' ? (flowObj as { id?: unknown }).id : undefined;
+    if (typeof proposalFlowId === 'string' && typeof panelFlowId === 'string' && proposalFlowId !== panelFlowId) return false;
     const proposals = [...current.payload.proposals, proposal].slice(-MAX_PROPOSALS);
     current.payload = { ...current.payload, proposals, mode: 'changes' };
     current.panel.reveal(undefined, false);

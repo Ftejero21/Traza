@@ -6,7 +6,7 @@
 import type { NexoLanguage } from '../../webview/src/app/bridge/protocol';
 import { compactSchema } from './schema-validator';
 
-export type PromptOp = 'FLOW' | 'SIMULATE' | 'SIMULATE_AFTER' | 'LOGS' | 'PROPOSE' | 'UI_PLAN' | 'DB_MAP' | 'DB_EXPLAIN' | 'FILE_SELECT';
+export type PromptOp = 'FLOW' | 'SIMULATE' | 'SIMULATE_BEFORE' | 'SIMULATE_AFTER' | 'LOGS' | 'PROPOSE' | 'UI_PLAN' | 'DB_MAP' | 'DB_EXPLAIN' | 'FILE_SELECT';
 
 export const COMMON_RULES = `Eres Traza, el asistente de flujos de código de la extensión Traza para VS Code. Respondes en el idioma del usuario.
 Solo puedes afirmar cosas que estén en el código que se te ha dado. Si falta información, dilo
@@ -81,7 +81,12 @@ const SIMULATE_TASK = `Tarea: ejecuta mentalmente el flujo, paso a paso, con est
 - "conclusion": la cadena causal completa: de dónde viene el valor, por qué pasos pasa sin
   problema, qué línea lo usa y qué ocurre. Cita clases y líneas.
 - "userImpact": qué ve el usuario, mirando cómo trata el error el frontend (callback error(),
-  catchError, interceptores). Si el error se traga sin aviso, dilo.
+  catchError, interceptores). Si el error se traga sin aviso, dilo. Si el resultado se muestra en la
+  interfaz (toast, alerta, mensaje, modal, estilo), sigue el valor hasta la plantilla y el CSS del
+  componente y di el texto, la variante o tipo y su aspecto (la clase o el color que aplica la plantilla).
+- Si falta una parte del camino pero el resto lo hace evidente (excepción → @ExceptionHandler → código y
+  HTTP → rama del frontend que trata ese código), decide el resultado con "confidence" «media» e indica
+  qué parte falta. No respondas "none" ni «no verificable» por eso.
 - "fix": el cambio concreto más pequeño que lo evita, y si procede la validación que debería
   existir. Vacío si es el comportamiento esperado.
 - "executedStepIds" / "skippedStepIds": los pasos que se ejecutan y los que no.
@@ -123,6 +128,7 @@ const PROPOSE_TASK = `Tarea: propone el cambio mínimo que cumple lo que pide el
 - "risks": efectos secundarios reales que se ven en el código (otros llamadores, tests que
   habrá que actualizar, cambios de contrato de la API). Vacío si no hay.
 - "flowId": el id del flujo afectado si lo hay; null si no.
+- "cases": de 1 a 3 casos del FLUJO ACTIVO en los que se nota el cambio, cada uno {"presetId","label","input"}. "presetId" es el id exacto de un elemento de simulationPresets. Si ninguno cubre la petición, "presetId": null con "label" (≤ 28 caracteres) e "input" (el inputExample con la condición de la petición aplicada). Omite "cases" si no hay flujo activo. No incluyas casos en los que el cambio no se ejecuta.
 - Si la petición es ambigua o peligrosa (borrar datos, desactivar seguridad), no propongas un diff:
   responde con un mensaje normal pidiendo aclaración.
 
@@ -157,9 +163,15 @@ const DB_MAP_TASK = `Recibes un diagrama de secuencia ya generado (FLUJO), los f
 - Textos en el idioma indicado. JSON compacto de menos de 600 tokens, sin texto fuera.
 `;
 
+const BEFORE_NOTE = `Recibes un CAMBIO PROPUESTO que AÚN NO está aplicado: el CODIGO es el original. Simula con el código original, sin aplicar el cambio.
+Fíjate en el comportamiento que el cambio modifica (las líneas «-» del diff) y descríbelo con precisión en "conclusion" y "userImpact", citando la línea, para poder compararlo con el después.
+`;
+
 const AFTER_NOTE = `El código que recibes YA incluye un cambio propuesto que aún no se ha aplicado. Evalúa el flujo con
 este código. En "conclusion", explica qué hace distinto respecto al original en este caso concreto
 (o di que se comporta igual), citando la línea cambiada.
+En "userImpact" describe lo que ve el usuario con las líneas «+», con el mismo detalle que lo haría para el original (texto, variante y aspecto).
+Si solo cambia el aspecto, "kind" y "httpStatus" son los del original. Recuerda que "badge" tiene como máximo 24 caracteres.
 `;
 
 /* ------------------------- comprobación del esquema (de los comandos de Claude) ------------------------- */
@@ -273,6 +285,7 @@ export function systemFor(op: PromptOp, language: NexoLanguage = 'es'): string {
   switch (op) {
     case 'FLOW': system = compose(`${COMMON_RULES}\n${FLOW_TASK}`, 'FlowDiagram', CHECK_FLOW); break;
     case 'SIMULATE': system = compose(`${COMMON_RULES}\n${SIMULATE_TASK}`, 'SimulationResult', CHECK_SIMULATE); break;
+    case 'SIMULATE_BEFORE': system = compose(`${COMMON_RULES}\n${SIMULATE_TASK}\n${BEFORE_NOTE}`, 'SimulationResult', CHECK_SIMULATE); break;
     case 'SIMULATE_AFTER': system = compose(`${COMMON_RULES}\n${SIMULATE_TASK}\n${AFTER_NOTE}`, 'SimulationResult', CHECK_SIMULATE); break;
     case 'LOGS': system = compose(`${COMMON_RULES}\n${LOGS_TASK}`, 'LogAnalysisResult', CHECK_LOGS); break;
     case 'PROPOSE': system = compose(`${COMMON_RULES}\n${PROPOSE_TASK}`, 'ChangeProposal', null); break;

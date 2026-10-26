@@ -1,4 +1,10 @@
 :host { display: block; min-width: 0; }
+/* Altura fija (separador arrastrable del panel): el diff ocupa el alto disponible de su columna. */
+:host(.is-fixed) { overflow: auto; }
+:host(.is-fixed) .wcx:not(.is-narrow) { height: 100%; }
+:host(.is-fixed) .wcx:not(.is-narrow) .wcx__col { min-height: 0; overflow: auto; }
+:host(.is-fixed) .wcx:not(.is-narrow) .wcx__diff { flex: 1 1 auto; min-height: 80px; max-height: none; }
+:host(.is-fixed) .wcx.is-narrow .wcx__diff { max-height: none; }
 
 .wcx { --wcx-mono: 'JetBrains Mono', 'Fira Code', Consolas, monospace; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); min-width: 0; font-size: 12px; color: var(--wce-text); }
 .wcx.is-narrow { grid-template-columns: minmax(0, 1fr); }

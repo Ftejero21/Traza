@@ -40,7 +40,9 @@
 .wcf__diagram { flex: 1 1 auto; min-height: 80px; overflow: auto; }
 /* Simular cambios: diagrama de altura fija y la comparación debajo. */
 .wcf.is-changes .wcf__diagram { flex: none; height: 250px; }
+.wcf.is-changes-fixed .wcf__diagram { flex: 1 1 auto; height: auto; }
 .wcf__changes { display: block; flex: 1 1 auto; min-height: 0; overflow: auto; border-top: 1px solid var(--wce-border); background: var(--wce-surface); }
+.wcf__changes.is-fixed { flex: 0 0 auto; max-height: calc(100% - 87px); }
 
 .wcf-canvas { position: relative; min-width: 560px; padding-bottom: 12px; }
 .wcf-lane { position: absolute; top: 14px; transform: translateX(-50%); max-width: 19.5%; display: inline-flex; align-items: center; gap: 5px; height: 26px;

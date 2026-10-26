@@ -354,26 +354,26 @@ function idiomaTail(lang: NexoLanguage): string {
   return `## IDIOMA DE LA RESPUESTA\n${lang === 'en' ? 'en' : 'es'}${JSON_TAIL}`;
 }
 
-function composeDiagnosis(flow: unknown, code: CodeWindow[], changeText: string | null, tail: string): string {
+function composeDiagnosis(flow: unknown, code: CodeWindow[], changeText: string | null, tail: string, applied = true): string {
   let sb = `## FLUJO\n${json(flow)}\n\n## CODIGO\n`;
   if (!code.length) sb += '(sin codigo)\n';
   for (const f of code) {
     sb += `### ${cut(f.path.trim(), 400)}:L${f.startLine ?? '?'}-L${f.endLine ?? '?'}\n${numbered(f.content, f.startLine)}\n\n`;
   }
-  if (changeText) sb += `## CAMBIO PROPUESTO (YA INCLUIDO EN EL CODIGO)\n${changeText}\n\n`;
+  if (changeText) sb += `## CAMBIO PROPUESTO (${applied ? 'YA INCLUIDO EN EL CODIGO' : 'AUN NO APLICADO: el CODIGO es el original'})\n${changeText}\n\n`;
   return `${sb}\n${tail}`;
 }
 
 /** FLUJO + CODIGO + tail, quitando ventanas del final hasta caber en el presupuesto. */
-function fitCode(flow: unknown, rawCode: CodeWindow[], changeText: string | null, tail: string): UserBuilder {
+function fitCode(flow: unknown, rawCode: CodeWindow[], changeText: string | null, tail: string, applied = true): UserBuilder {
   const base = rawCode.filter((f) => f.path.trim() && f.content && f.content.length <= MAX_WINDOW_CHARS).slice(0, MAX_WINDOWS);
   return (maxChars) => {
     const budget = Math.min(Math.max(8000, FLOW_MAX_CONTEXT_CHARS) + tail.length, maxChars);
     const code = [...base];
-    let text = composeDiagnosis(flow, code, changeText, tail);
+    let text = composeDiagnosis(flow, code, changeText, tail, applied);
     while (text.length > budget && code.length) {
       code.pop();
-      text = composeDiagnosis(flow, code, changeText, tail);
+      text = composeDiagnosis(flow, code, changeText, tail, applied);
     }
     return text;
   };
@@ -421,7 +421,7 @@ function composeFlowText(input: FlowTextInput, map: string, fragments: ContextFr
   return `${sb}\n\n${idiomaTail(input.lang)}`;
 }
 
-/** Recorte de tejechat: primero fragmentos del final, luego el mapa y luego el archivo activo. */
+/** Recorte de tejechat: primero fragmentos de menor prioridad (el último entre iguales), luego el mapa y luego el archivo activo. */
 function fitFlowText(input: FlowTextInput): UserBuilder {
   return (maxChars) => {
     const max = Math.min(Math.max(8000, FLOW_MAX_CONTEXT_CHARS), maxChars);
@@ -430,7 +430,16 @@ function fitFlowText(input: FlowTextInput): UserBuilder {
     let activeContent = input.context.active ? input.context.active.content : null;
     let text = composeFlowText(input, map, fragments, activeContent);
     while (text.length > max && fragments.length) {
-      fragments.pop();
+      let drop = fragments.length - 1;
+      let lowest = fragments[drop].priority ?? 1;
+      for (let i = drop - 1; i >= 0; i--) {
+        const priority = fragments[i].priority ?? 1;
+        if (priority < lowest) {
+          lowest = priority;
+          drop = i;
+        }
+      }
+      fragments.splice(drop, 1);
       text = composeFlowText(input, map, fragments, activeContent);
     }
     if (text.length > max && map) {
@@ -586,6 +595,8 @@ export class HostAi {
   private last: GeneratedFlow | null = null;
   /** Últimos flujos generados (máx. 10, solo en memoria), para reabrirlos por id. */
   private readonly recent = new Map<string, GeneratedFlow>();
+  /** Propuestas de cambio por flujo (máx. 10 por flujo, solo en memoria), para reabrir «Simular cambios». */
+  private readonly proposals = new Map<string, Obj[]>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -602,6 +613,18 @@ export class HostAi {
   /** Flujo generado en esta sesión por su id (de los últimos 10); `null` si no está. */
   flowById(id: string): GeneratedFlow | null {
     return this.recent.get(id) ?? null;
+  }
+
+  /** Guarda una propuesta asociada a un flujo reciente (máx. 10 por flujo; descarta las más antiguas). */
+  rememberProposal(flowId: string, proposal: Obj): void {
+    if (!this.recent.has(flowId)) return;
+    const list = [...(this.proposals.get(flowId) ?? []), proposal].slice(-10);
+    this.proposals.set(flowId, list);
+  }
+
+  /** Propuestas guardadas de un flujo (copia). */
+  proposalsFor(flowId: string): Obj[] {
+    return [...(this.proposals.get(flowId) ?? [])];
   }
 
   /* ------------------------------ modelo ------------------------------ */
@@ -964,6 +987,7 @@ export class HostAi {
         throw error;
       }
       const changeText = changeDiff({ title, summary, files });
+      trazaLog().info(`Comparar · casos=${cases.length} · ventanas=${d.code.length} (${d.code.reduce((n, w) => n + w.content.length, 0)} caracteres) · despues=${afterCode.length}`);
       const model = await this.resolveModel();
       const opts: RunOptions = { model, token: child.token, language: lang };
       const simulateCheck = (root: Obj): Validation => {
@@ -984,7 +1008,7 @@ export class HostAi {
           try {
             const run = job.after
               ? await this.runJson('SIMULATE_AFTER', systemFor('SIMULATE_AFTER'), fitCode(d.flow, afterCode, changeText, simulateTail(input, lang)), simulateCheck, opts)
-              : await this.runJson('SIMULATE', systemFor('SIMULATE'), fitCode(d.flow, d.code, null, simulateTail(input, lang)), simulateCheck, opts);
+              : await this.runJson('SIMULATE_BEFORE', systemFor('SIMULATE_BEFORE'), fitCode(d.flow, d.code, changeText, simulateTail(input, lang), false), simulateCheck, opts);
             results[job.index][job.after ? 1 : 0] = run;
           } catch (error: unknown) {
             if (failure === null) failure = error;
@@ -1107,6 +1131,7 @@ export class HostAi {
       const oldest = this.recent.keys().next();
       if (oldest.done) break;
       this.recent.delete(oldest.value);
+      this.proposals.delete(oldest.value);
     }
   }
 
@@ -1127,6 +1152,7 @@ export class HostAi {
         ...(options.folder ? { folder: options.folder } : {}),
         token,
         progress: options.progress,
+        log: trazaLog(),
         selectFiles: (input) => this.selectFiles(model, input, token, lang),
       });
       options.progress?.(lang === 'en' ? 'Generating the flow…' : 'Generando el flujo…');
@@ -1185,7 +1211,8 @@ export class HostAi {
         if (!pinnedPaths.includes(path)) pinnedPaths.push(path);
       }
       const context = await collectFlowContext({
-        question: maskSensitiveText(question), pinned: options.pinned ?? [], pinnedPaths, useActiveEditor: false, token, progress: options.progress,
+        question: maskSensitiveText(question), pinned: options.pinned ?? [], pinnedPaths, useActiveEditor: false, token, progress: options.progress, log: trazaLog(),
+        selectFiles: (input) => this.selectFiles(model, input, token, lang), prioritizeRequest: true,
       });
       options.progress?.(lang === 'en' ? 'Proposing the change…' : 'Proponiendo el cambio…');
       const activeFlow = json(stripFlow(flow));
@@ -1224,6 +1251,9 @@ export class HostAi {
       proposal['id'] = crypto.randomUUID();
       proposal['request'] = question;
       proposal['flowId'] = typeof flow['id'] === 'string' ? flow['id'] : null;
+      const cases = sanitizeProposalCases(proposal['cases'], flow);
+      if (cases.length) proposal['cases'] = cases;
+      else delete proposal['cases'];
       proposal['createdAt'] = new Date().toISOString();
       return { proposal, model: modelLabel(model) };
     } catch (error: unknown) {
@@ -1274,6 +1304,41 @@ export class HostAi {
 const PRIVATE_KEY_CHECK = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 
 /** El flujo activo sin datos solo de frontend ni resultados (`codeSnapshot`, `dbMap`, `scenario`, `verification`). */
+const MAX_PROPOSAL_CASES = 3;
+const MAX_CASE_LABEL = 28;
+
+/** Casos de la propuesta: preset conocido del flujo o caso nuevo con label e input válidos; lo demás se descarta. */
+function sanitizeProposalCases(raw: unknown, flow: Obj): Obj[] {
+  if (!Array.isArray(raw)) return [];
+  const presets = new Map<string, string>();
+  for (const preset of Array.isArray(flow['simulationPresets']) ? flow['simulationPresets'] : []) {
+    if (!isObj(preset)) continue;
+    const id = txt(preset['id']).trim();
+    if (id) presets.set(id, txt(preset['label']).trim());
+  }
+  const out: Obj[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (out.length >= MAX_PROPOSAL_CASES) break;
+    if (!isObj(item)) continue;
+    const presetId = typeof item['presetId'] === 'string' ? item['presetId'].trim() : null;
+    if (presetId && presetId.length <= 100 && presets.has(presetId)) {
+      if (seen.has(presetId)) continue;
+      seen.add(presetId);
+      out.push({ presetId, label: cut(presets.get(presetId) || presetId, MAX_CASE_LABEL), input: null });
+      continue;
+    }
+    const label = typeof item['label'] === 'string' ? cut(item['label'].trim(), MAX_CASE_LABEL) : '';
+    const input = item['input'];
+    if (!label || !isObj(input) || json(input).length > MAX_INPUT_CHARS) continue;
+    const key = `new:${label.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ presetId: null, label, input: maskSensitiveJson(input) });
+  }
+  return out;
+}
+
 function stripFlow(flow: Obj): unknown {
   const strip = (value: unknown, depth: number): unknown => {
     if (depth > 32) return null;

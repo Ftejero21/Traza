@@ -5,9 +5,9 @@
  */
 import { WorkspaceCodeFile, WorkspaceCodeMount, normalizeCodePath } from '../workspace-code.types';
 import { GitTextLine, gitDominantEol, gitJoinLines, gitSplitLines } from '../services/workspace-code-git-patch';
-import { MASK } from './workspace-code-ai-mask';
+import { MASK, maskSensitiveJson } from './workspace-code-ai-mask';
 import { FlowDiagram, SimulationPreset, SimulationResult } from './nexo-ia.types';
-import { CaseComparison, ChangeProposal, ComparisonTag, DiffHunk, DiffLine, DiffLineKind, FileChange } from './nexo-ia.changes.types';
+import { CaseComparison, ChangeCase, ChangeProposal, ComparisonTag, DiffHunk, DiffLine, DiffLineKind, FileChange } from './nexo-ia.changes.types';
 
 const MAX_TITLE = 70;
 const MAX_SUMMARY = 500;
@@ -20,6 +20,9 @@ const MAX_LINES = 400;
 const MAX_TEXT = 2000;
 const MAX_HEADER = 80;
 const MAX_REQUEST = 4000;
+const MAX_CASES = 3;
+const MAX_CASE_LABEL = 28;
+const MAX_CASE_INPUT = 20_000;
 const MAX_PATH = 1000;
 const MAX_MOUNT_ID = 200;
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,100}$/;
@@ -87,6 +90,7 @@ export function sanitizeChangeProposal(raw: unknown, question: string, preserve 
   const request = (question || str(raw['request'], MAX_REQUEST)).slice(0, MAX_REQUEST);
   const status = preserve && STATUSES.includes(raw['status'] as ChangeProposal['status']) ? raw['status'] as ChangeProposal['status'] : 'pending';
   const createdAt = preserve && typeof raw['createdAt'] === 'string' && raw['createdAt'] ? raw['createdAt'] : new Date().toISOString();
+  const cases = sanitizeChangeCases(raw['cases']);
   return {
     id: ID_PATTERN.test(rawId) ? rawId : newId(),
     request,
@@ -95,9 +99,38 @@ export function sanitizeChangeProposal(raw: unknown, question: string, preserve 
     files,
     flowId: typeof flowId === 'string' && flowId ? flowId.slice(0, 200) : null,
     risks,
+    ...(cases.length ? { cases } : {}),
     status,
     createdAt,
   };
+}
+
+/** Casos de la propuesta: hasta 3, `presetId` válido o null, label no vacío (≤28) e input JSON de ≤20000. Lo demás se descarta. */
+function sanitizeChangeCases(raw: unknown): ChangeCase[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChangeCase[] = [];
+  for (const item of raw) {
+    if (out.length >= MAX_CASES) break;
+    if (!isRecord(item)) continue;
+    const rawId = item['presetId'];
+    const presetId = typeof rawId === 'string' && ID_PATTERN.test(rawId) ? rawId : null;
+    if (typeof rawId === 'string' && !presetId) continue;
+    const label = str(item['label'], MAX_CASE_LABEL).trim();
+    if (!label) continue;
+    let input: unknown = null;
+    if (!presetId) {
+      if (!isRecord(item['input'])) continue;
+      try {
+        if (JSON.stringify(item['input']).length > MAX_CASE_INPUT) continue;
+      } catch (error: unknown) {
+        console.warn('[Traza] Caso con entrada no serializable.', error instanceof Error ? error.name : '');
+        continue;
+      }
+      input = maskSensitiveJson(item['input']);
+    }
+    out.push({ presetId, label, input });
+  }
+  return out;
 }
 
 function sanitizeFile(raw: unknown, preserve: boolean): FileChange | null {
@@ -352,6 +385,58 @@ export function caseTouchedByChange(flow: FlowDiagram, files: FileChange[], befo
   if (after.failStepId) executed.add(after.failStepId);
   if (flow.steps.some((s) => executed.has(s.id) && hits(s.ref?.mountId, s.ref?.file))) return true;
   return [before.where, after.where].some((w) => !!w && hits(w.mountId, w.file));
+}
+
+const CASE_STOPWORDS = new Set(['necesito', 'quiero', 'cambiar', 'cambiemos', 'cambia', 'cambio', 'cuando', 'para', 'como', 'sale', 'salga', 'este', 'esta', 'esto', 'estos', 'estas', 'desde', 'hacer', 'haga', 'ponga', 'poner', 'pasar', 'pase', 'tenga', 'tiene', 'cada', 'sobre', 'entre', 'hasta', 'donde', 'cual', 'pero', 'with', 'that', 'from', 'when', 'make', 'change']);
+
+function caseTokens(text: string): string[] {
+  const words = String(text ?? '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').split(/[^a-z0-9]+/);
+  return words.filter((w) => w.length >= 4 && !CASE_STOPWORDS.has(w));
+}
+
+/**
+ * Presets que se comparan en «Simular cambios»: los `cases` de la propuesta (presets del flujo o sintéticos `change-N`)
+ * o, sin ellos, los presets cuya etiqueta coincide con `request + summary`; sin coincidencias, todos.
+ */
+export function changeCasePresets(flow: FlowDiagram, proposal: ChangeProposal, max = 7): SimulationPreset[] {
+  const presets = flow.simulationPresets ?? [];
+  const byId = new Map(presets.map((p) => [p.id, p]));
+  const used = new Set<string>(byId.keys());
+  const labels = new Set<string>();
+  const picked: SimulationPreset[] = [];
+  for (const c of proposal.cases ?? []) {
+    if (picked.length >= MAX_CASES) break;
+    let preset: SimulationPreset | undefined;
+    const known = c.presetId ? byId.get(c.presetId) : undefined;
+    if (known) {
+      if (picked.some((p) => p.id === known.id)) continue;
+      preset = known;
+    } else if (c.label && isRecord(c.input)) {
+      const key = c.label.toLowerCase();
+      if (labels.has(key)) continue;
+      labels.add(key);
+      let n = picked.length + 1;
+      while (used.has(`change-${n}`)) n++;
+      const id = `change-${n}`;
+      used.add(id);
+      preset = { id, label: c.label.slice(0, MAX_CASE_LABEL), input: c.input, expected: { kind: 'none', failStepId: null } };
+    }
+    if (preset) picked.push(preset);
+  }
+  if (picked.length) return picked.slice(0, Math.max(1, max));
+  const tokens = [...new Set(caseTokens(`${proposal.request ?? ''} ${proposal.summary ?? ''}`))];
+  if (tokens.length) {
+    const scored = presets.map((preset) => {
+      let score = 0;
+      for (const word of new Set(caseTokens(preset.label))) {
+        if (tokens.includes(word) || (word.length >= 6 && tokens.some((t) => t.length >= 6 && t.slice(0, 5) === word.slice(0, 5)))) score++;
+      }
+      return { preset, score };
+    });
+    const best = Math.max(0, ...scored.map((s) => s.score));
+    if (best >= 1) return scored.filter((s) => s.score === best).slice(0, MAX_CASES).map((s) => s.preset);
+  }
+  return presets.slice(0, max);
 }
 
 /** Regresiones primero; el resto en el orden de los presets del flujo. */

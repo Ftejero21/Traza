@@ -311,6 +311,20 @@
           "null"
         ]
       },
+      "cases": {
+        "type": "array",
+        "maxItems": 3,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["presetId", "label", "input"],
+          "properties": {
+            "presetId": { "type": ["string", "null"] },
+            "label": { "type": "string", "maxLength": 28 },
+            "input": {}
+          }
+        }
+      },
       "risks": {
         "type": "array",
         "items": {

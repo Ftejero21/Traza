@@ -5,6 +5,7 @@
  */
 import * as vscode from 'vscode';
 import type { GeneratedFlow } from './host-ai';
+import type { ChangeRunResult } from './host-change';
 import { foldAccents } from './host-context';
 import { normalizeCodePath } from './host-guards';
 
@@ -279,4 +280,108 @@ export function formatFlowChatMarkdown(generated: GeneratedFlow): string {
     parts.push(`**${es ? 'Pasos' : 'Steps'}**\n\n${list}${more}`);
   }
   return parts.join('\n\n');
+}
+
+/* ------------------------------ cambios ------------------------------ */
+
+const CHANGE_QUESTION_START = /^(como|que|donde|por que|cual|cuales|cuando|how|what|where|why|which|when)\b/;
+const CHANGE_PATTERNS: readonly RegExp[] = [
+  /^(por favor\s+)?(cambia|cambie|cambiemos|modifica|modifique|anade|agrega|pon|pongamos|quita|elimina|renombra|refactoriza|implementa|arregla|corrige|sustituye|reemplaza|haz que)\b/,
+  /\b(necesito|quiero|me gustaria|puedes|podrias|hay que)\s+(que\s+)?(\w+\s+){0,12}?(cambi|modific|anad|agreg|pong|poner|quit|elimin|renombr|refactoriz|implement|arregl|corrig|sustitu|reemplaz)\w*/,
+  /^(please\s+)?(change|modify|add|remove|rename|refactor|implement|fix|replace|make)\b/,
+  /\b(i need|i want|can you|could you|please)\s+(to\s+)?(\w+\s+){0,6}?(change|modify|add|remove|rename|refactor|implement|fix|replace|make)\b/,
+];
+
+/** ¿El texto es una petición de cambio de código/UI (y no una pregunta ni un escenario)? */
+export function isChangeRequest(text: string): boolean {
+  if (isScenarioQuestion(text)) return false;
+  const folded = foldAccents(text).toLowerCase().trim().replace(/^[¿¡\s]+/, '');
+  if (!folded || CHANGE_QUESTION_START.test(folded)) return false;
+  return CHANGE_PATTERNS.some((re) => re.test(folded));
+}
+
+const MAX_CHANGE_FILES = 12;
+const MAX_CHANGE_RISKS = 5;
+
+interface ChangeFileLine {
+  path: string;
+  status: string;
+}
+
+function changeFiles(proposal: Record<string, unknown>): { lines: ChangeFileLine[]; more: number } {
+  const multi = (vscode.workspace.workspaceFolders ?? []).length > 1;
+  const all = asArray(proposal['files']).map(asObject).filter((f): f is Record<string, unknown> => f !== null);
+  const lines = all.slice(0, MAX_CHANGE_FILES).map((f) => {
+    const mount = typeof f['mountId'] === 'string' ? f['mountId'].trim() : '';
+    const rel = oneLine(f['path'], MAX_FILE);
+    return { path: multi && mount ? `${mount}/${rel}` : rel, status: oneLine(f['status'], 20) };
+  });
+  return { lines, more: Math.max(0, all.length - lines.length) };
+}
+
+function changeRisks(proposal: Record<string, unknown>): string[] {
+  return asArray(proposal['risks']).map((r) => oneLine(r, 200)).filter((r) => r).slice(0, MAX_CHANGE_RISKS);
+}
+
+/** Markdown del chat para una petición de cambio resuelta; todo texto de la IA escapado. */
+export function formatChangeChatMarkdown(r: ChangeRunResult): string {
+  const es = isSpanish();
+  const esc = escapeMarkdown;
+  if (r.kind === 'answer') return esc(oneLine(r.answer, 1500));
+  const proposal = r.proposal;
+  const flowTitle = esc(oneLine(r.flowTitle, 120));
+  const parts: string[] = [
+    r.generated
+      ? `${es ? 'Flujo generado' : 'Generated flow'}: **${flowTitle}**`
+      : `${es ? 'Sobre el flujo abierto' : 'On the open flow'}: **${flowTitle}**`,
+    `**${esc(oneLine(proposal['title'], 120))}**`,
+  ];
+  const summary = oneLine(proposal['summary'], MAX_SUMMARY);
+  if (summary) parts.push(esc(summary));
+  const files = changeFiles(proposal);
+  if (files.lines.length) {
+    const list = files.lines.map((f) => `- ${esc(f.path)}${f.status ? ` (${esc(f.status)})` : ''}`).join('\n');
+    const more = files.more > 0 ? `\n\n${es ? `… y ${files.more} archivos más` : `… and ${files.more} more files`}` : '';
+    parts.push(`**${es ? 'Archivos' : 'Files'}**\n\n${list}${more}`);
+  }
+  const risks = changeRisks(proposal);
+  if (risks.length) parts.push(`**${es ? 'Riesgos' : 'Risks'}**\n\n${risks.map((x) => `- ${esc(x)}`).join('\n')}`);
+  parts.push(es
+    ? 'Abierto en «Simular cambios» (antes/después)\\. No se ha modificado ningún archivo\\.'
+    : 'Opened in "Simular cambios" (before/after)\\. No file has been modified\\.');
+  return parts.join('\n\n');
+}
+
+/** Texto plano y acotado para el agente tras una petición de cambio; `showUri` vacío = sin enlace. */
+export function formatChangeToolText(r: ChangeRunResult, showUri: string): string {
+  const es = isSpanish();
+  const flowTitle = oneLine(r.flowTitle, 120);
+  const flowLine = r.generated
+    ? `${es ? 'Flujo generado' : 'Generated flow'}: ${flowTitle}`
+    : `${es ? 'Sobre el flujo abierto' : 'On the open flow'}: ${flowTitle}`;
+  const lines: string[] = [];
+  if (r.kind === 'answer') {
+    lines.push(`${es ? 'Traza necesita una aclaración' : 'Traza needs a clarification'}: ${oneLine(r.answer, 1500)}`, flowLine);
+    if (r.generated) lines.push(es ? 'El flujo generado está abierto en el panel. No se ha modificado ningún archivo.' : 'The generated flow is open in the panel. No file has been modified.');
+    if (showUri) lines.push(`End your answer with this exact markdown link on its own line, unchanged: [${flowLinkTitle()}](${showUri})`);
+    return lines.join('\n');
+  }
+  const proposal = r.proposal;
+  lines.push(flowLine, `${es ? 'Modelo' : 'Model'}: ${oneLine(r.model, 120)}`);
+  lines.push(`${es ? 'Propuesta' : 'Proposal'}: ${oneLine(proposal['title'], 120)}`);
+  const summary = oneLine(proposal['summary'], MAX_SUMMARY);
+  if (summary) lines.push(`${es ? 'Resumen' : 'Summary'}: ${summary}`);
+  const files = changeFiles(proposal);
+  if (files.lines.length) {
+    lines.push(es ? 'Archivos:' : 'Files:', ...files.lines.map((f) => `- ${f.path}${f.status ? ` (${f.status})` : ''}`));
+    if (files.more > 0) lines.push(es ? `… y ${files.more} archivos más` : `… and ${files.more} more files`);
+  }
+  const risks = changeRisks(proposal);
+  if (risks.length) lines.push(es ? 'Riesgos:' : 'Risks:', ...risks.map((x) => `- ${x}`));
+  lines.push(es
+    ? 'La propuesta ya está abierta en «Simular cambios» (antes/después) del panel de Traza. No se ha modificado ningún archivo; el usuario la revisa y aplica desde ahí.'
+    : 'The proposal is already open in "Simular cambios" (before/after) in the Traza panel. No file has been modified; the user reviews and applies it from there.');
+  if (showUri) lines.push(`End your answer with this exact markdown link on its own line, unchanged: [${es ? 'Ver cambios' : 'View changes'}](${showUri})`);
+  else lines.push(es ? 'Está abierta en el panel de Traza.' : 'It is open in the Traza panel.');
+  return lines.join('\n');
 }

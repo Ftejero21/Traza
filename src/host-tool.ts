@@ -7,8 +7,9 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { FlowPanel } from './flow-panel';
 import { isCancelled, type HostAi } from './host-ai';
+import { runChangeRequest } from './host-change';
 import type { PinnedRef } from './host-context';
-import { formatFlowToolText, isScenarioQuestion, isSpanish, oneLine, resolveFlowFolder } from './host-flow-summary';
+import { formatChangeToolText, formatFlowToolText, isScenarioQuestion, isSpanish, oneLine, resolveFlowFolder } from './host-flow-summary';
 import { MAX_ASK_CHARS, normalizeCodePath } from './host-guards';
 
 interface FlowToolInput {
@@ -18,6 +19,8 @@ interface FlowToolInput {
   project?: string;
   /** `true` si el usuario pregunta qué pasa en una situación concreta. */
   scenario?: boolean;
+  /** Petición de cambio literal del usuario: genera/reutiliza el flujo, propone el cambio y lo abre en «Simular cambios». */
+  change?: string;
 }
 
 const MAX_FILES = 12;
@@ -82,6 +85,15 @@ function projectOf(input: unknown): string | undefined {
   return project && project.length <= MAX_PROJECT ? project : undefined;
 }
 
+/** `change` de la tool (string 1–MAX_ASK_CHARS tras `trim`); `undefined` si no viene o no es válido. */
+function changeOf(input: unknown): string | undefined {
+  const raw = input && typeof input === 'object' ? (input as { change?: unknown }).change : undefined;
+  const change = typeof raw === 'string' ? raw.trim() : '';
+  return change && change.length <= MAX_ASK_CHARS ? change : undefined;
+}
+
+const FLOW_ID = /^[0-9a-f-]{36}$/i;
+
 function scenarioOf(input: unknown, question: string): boolean {
   const flag = input && typeof input === 'object' ? (input as { scenario?: unknown }).scenario : undefined;
   return flag === true || isScenarioQuestion(question);
@@ -98,7 +110,21 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
       const es = isSpanish();
       const raw = (options.input as { question?: unknown } | undefined)?.question;
       const question = typeof raw === 'string' ? oneLine(raw, MAX_CONFIRM_QUESTION) : '';
+      const change = changeOf(options.input);
       const message = new vscode.MarkdownString();
+      if (change !== undefined) {
+        message.appendText(es
+          ? 'Traza enviará al proveedor del modelo configurado en Traza las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). Se generará una propuesta que solo se simula en «Simular cambios»; no se modificará ningún archivo.\n\nPregunta: '
+          : 'Traza will send the relevant workspace paths and code fragments to the provider of the model configured in Traza (never sensitive files such as .env or keys, and with secrets masked). A proposal will be generated that is only simulated in "Simular cambios"; no file will be modified.\n\nQuestion: ');
+        message.appendText(question);
+        message.appendText(`\n\n${es ? 'Cambio' : 'Change'}: ${oneLine(change, MAX_CONFIRM_QUESTION)}`);
+        const changeFolder = resolveFlowFolder(change, projectOf(options.input));
+        if (changeFolder) message.appendText(`\n\n${es ? 'Carpeta' : 'Folder'}: ${oneLine(changeFolder.name, MAX_PROJECT)}`);
+        return {
+          invocationMessage: es ? 'Proponiendo el cambio con Traza…' : 'Proposing the change with Traza…',
+          confirmationMessages: { title: es ? 'Proponer cambio con Traza' : 'Propose change with Traza', message },
+        };
+      }
       message.appendText(es
         ? 'Traza enviará al proveedor del modelo configurado en Traza las rutas y los fragmentos de código relevantes del workspace (nunca archivos sensibles como .env o claves, y con los secretos enmascarados). No se modificará ningún archivo.\n\nPregunta: '
         : 'Traza will send the relevant workspace paths and code fragments to the provider of the model configured in Traza (never sensitive files such as .env or keys, and with secrets masked). No file will be modified.\n\nQuestion: ');
@@ -113,6 +139,7 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
     },
     async invoke(options, token) {
       const question = questionOf(options.input);
+      const change = changeOf(options.input);
       const files = (options.input as { files?: unknown } | undefined)?.files;
       const pinned = pinnedFromFiles(files);
       const folder = resolveFlowFolder(question, projectOf(options.input));
@@ -123,6 +150,17 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
       currentRun = cts;
       const listener = token.onCancellationRequested(() => cts.cancel());
       try {
+        if (change !== undefined) {
+          const changeFolder = resolveFlowFolder(`${change} ${question}`, projectOf(options.input));
+          const result = await runChangeRequest(context, ai, {
+            request: change, flowQuestion: question, pinned, useActiveEditor: true, token: cts.token, progress: () => {},
+            ...(changeFolder ? { folder: changeFolder.name } : {}),
+          });
+          const known = FLOW_ID.test(result.flowId) && ai.flowById(result.flowId) !== null;
+          const base = `${vscode.env.uriScheme}://${context.extension.id}/show?id=${encodeURIComponent(result.flowId)}`;
+          const showUri = known ? (result.kind === 'proposal' ? `${base}&mode=changes` : base) : '';
+          return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(formatChangeToolText(result, showUri))]);
+        }
         const generated = await ai.generateFlow({
           question, pinned, useActiveEditor: true, token: cts.token, progress: () => {},
           ...(folder ? { folder: folder.name } : {}), scenario,
@@ -134,12 +172,19 @@ export function registerFlowTool(context: vscode.ExtensionContext, ai: HostAi): 
       } catch (error: unknown) {
         if (token.isCancellationRequested) throw new vscode.CancellationError();
         if (isCancelled(error)) {
-          return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(isSpanish()
-            ? 'La generación del flujo se canceló (se inició otra generación o no se eligió modelo).'
-            : 'The flow generation was cancelled (another generation started or no model was chosen).')]);
+          return new vscode.LanguageModelToolResult([new vscode.LanguageModelTextPart(change !== undefined
+            ? (isSpanish()
+              ? 'La propuesta de cambio se canceló (se inició otra generación o no se eligió modelo).'
+              : 'The change proposal was cancelled (another generation started or no model was chosen).')
+            : (isSpanish()
+              ? 'La generación del flujo se canceló (se inició otra generación o no se eligió modelo).'
+              : 'The flow generation was cancelled (another generation started or no model was chosen).'))]);
         }
         console.warn('[Traza] Error en la herramienta traza_flow.', error instanceof Error ? error.name : '');
-        throw new Error(`${isSpanish() ? 'Traza no pudo generar el flujo: ' : 'Traza could not generate the flow: '}${errorMessage(error)}`);
+        const prefix = change !== undefined
+          ? (isSpanish() ? 'Traza no pudo proponer el cambio: ' : 'Traza could not propose the change: ')
+          : (isSpanish() ? 'Traza no pudo generar el flujo: ' : 'Traza could not generate the flow: ');
+        throw new Error(`${prefix}${errorMessage(error)}`);
       } finally {
         listener.dispose();
         if (currentRun === cts) currentRun = undefined;

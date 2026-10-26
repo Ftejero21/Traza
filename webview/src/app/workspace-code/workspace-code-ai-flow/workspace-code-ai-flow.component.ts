@@ -75,6 +75,7 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   @ViewChild('main') main?: ElementRef<HTMLDivElement>;
   @ViewChild('lab') lab?: ElementRef<HTMLDivElement>;
   @ViewChild('detail') detail?: ElementRef<HTMLElement>;
+  @ViewChild('changes', { read: ElementRef }) changesPanel?: ElementRef<HTMLElement>;
   @ViewChild('diagram') diagram?: ElementRef<HTMLDivElement>;
   @ViewChild('canvas') canvas?: ElementRef<HTMLDivElement>;
   @ViewChild('uiPreview') uiPreview?: ElementRef<HTMLElement>;
@@ -325,6 +326,12 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
 
   savedFailMark(i: number): 'danger' | 'warning' | null {
     return this.flowService.savedFailMark(i);
+  }
+
+  /** Pestaña pulsada a mano: «Simular cambios» lanza la comparación si la propuesta activa aún no tiene. */
+  selectMode(mode: FlowMode): void {
+    this.flowService.setMode(mode);
+    if (mode === 'changes') this.flowService.autoCompareActiveChange();
   }
 
   openSaved(mode: 'sim' | 'logs'): void {
@@ -878,7 +885,7 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     const max = main ? main.clientHeight - (split?.offsetHeight ?? 0) - 4 : need;
     const target = Math.floor(Math.min(need, max));
     if (target <= 0 || diagram.clientHeight >= target) return false;
-    const panel = this.lab?.nativeElement ?? this.detail?.nativeElement ?? null;
+    const panel = this.lab?.nativeElement ?? this.detail?.nativeElement ?? this.changesPanel?.nativeElement ?? null;
     this.diagramSavedStyle = {
       minHeight: diagram.style.minHeight,
       panel,
@@ -938,8 +945,8 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   startDrag(event: PointerEvent): void {
     if (event.button !== 0) return;
     const main = this.main?.nativeElement.getBoundingClientRect();
-    // El mismo separador redimensiona el validador (Simular datos / Analizar logs) o el detalle del Recorrido.
-    const lab = (this.lab ?? this.detail)?.nativeElement.getBoundingClientRect();
+    // El mismo separador redimensiona el validador (Simular datos / Analizar logs), el detalle del Recorrido o el panel de cambios.
+    const lab = (this.lab ?? this.detail ?? this.changesPanel)?.nativeElement.getBoundingClientRect();
     if (!main || !lab) return;
     event.preventDefault();
     this.dragOrigin = { top: main.top, bottom: main.bottom, height: main.height };

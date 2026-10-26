@@ -8,6 +8,7 @@ import { SAMPLE_PROPOSALS } from './sample/sample-changes';
 import { SAMPLE_FILES, SAMPLE_FLOW } from './sample/sample-project';
 import { SAMPLE_LOGS } from './sample/sample-logs';
 import { FlowDiagram } from './workspace-code/ai/nexo-ia.types';
+import { sanitizeFlowDiagram } from './workspace-code/ai/workspace-code-flow-sanitize';
 import { WorkspaceCodeI18nService } from './workspace-code/i18n/workspace-code-i18n.service';
 import { WorkspaceCodeAiChangeService } from './workspace-code/services/workspace-code-ai-change.service';
 import { WorkspaceCodeAiFlowService } from './workspace-code/services/workspace-code-ai-flow.service';
@@ -79,6 +80,20 @@ export class AppComponent implements OnInit, OnDestroy {
         // Flujo recién generado por la IA con escenario: se abre en «Simular» con el resultado reproducido.
         const scenario = !msg.sample && !!msg.source && !msg.mode && !!flow && typeof flow === 'object' && !Array.isArray(flow)
           && !!(flow as { scenario?: unknown }).scenario;
+        if (msg.mode === 'changes') {
+          // Petición de cambio: las propuestas se cargan antes de abrir para entrar directo en «Simular cambios»
+          // (sin pasar por «Recorrido») y la comparación antes/después se lanza sola.
+          const candidate = sanitizeFlowDiagram(flow, true);
+          if (candidate) await this.changes.load(proposals, candidate, false);
+          const opened = await this.flowService.open(flow, step, 'changes');
+          if (!opened) {
+            this.notify.show('El JSON no es un flujo válido', 'danger');
+            return;
+          }
+          this.flowService.refreshChange();
+          this.flowService.autoCompareActiveChange();
+          return;
+        }
         const ok = scenario && msg.source
           ? await this.flowService.openScenario(flow as FlowDiagram, { provider: 'lm', model: msg.source.model })
           : await this.flowService.open(flow, step, mode);
@@ -87,7 +102,7 @@ export class AppComponent implements OnInit, OnDestroy {
           return;
         }
         await this.changes.load(proposals, this.flowService.flow);
-        if (msg.mode === 'db' || msg.mode === 'changes') this.flowService.setMode(msg.mode);
+        if (msg.mode === 'db') this.flowService.setMode(msg.mode);
         // Modo navegador: los logs de ejemplo quedan precargados en «Analizar logs».
         if (this.bridge.isMock && msg.sample && !this.flowService.ui.logsInput) this.flowService.setLogsInput(SAMPLE_LOGS);
         return;

@@ -32,7 +32,10 @@ const MAX_TEXT_CHARS = 3 * 1024 * 1024;
 const NO_CLASS_LANGS = new Set(['html', 'htm', 'sql', 'xml', 'json', 'yml', 'yaml', 'properties']);
 /** Plantillas, estilos y datos: no tienen funciones, así que `functionName` («template», «styles»…) no se busca en el texto. */
 const NO_FUNCTION_LANGS = new Set(['html', 'htm', 'css', 'scss', 'sass', 'less', 'xml', 'json', 'yml', 'yaml', 'properties']);
-const BRACE_LANGS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'java', 'kt', 'kts', 'cs', 'go', 'scala', 'swift', 'dart', 'php', 'c', 'cpp', 'h', 'hpp', 'rs']);
+const DECLARATION_LINE = /^\s*(?:(?:public|private|protected|internal|static|async|override|abstract|final|synchronized|readonly|virtual|function)\s+)*(?:[\w$<>\[\],.?]+\s+)?([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/;
+const NOT_DECLARATION = /^\s*(?:return|await|if|else|while|for|switch|throw|new|yield|case|const|let|var|this|super|catch)\b/;
+const NOT_DECLARATION_NAME = new Set(['return', 'await', 'if', 'else', 'while', 'for', 'switch', 'throw', 'new', 'yield', 'case', 'const', 'let', 'var', 'this', 'super', 'catch']);
+const BRACE_LANGS =new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'java', 'kt', 'kts', 'cs', 'go', 'scala', 'swift', 'dart', 'php', 'c', 'cpp', 'h', 'hpp', 'rs']);
 /** Máximo de líneas que se escanean para un decorador/anotación de clase (y hacia arriba buscando su inicio). */
 const MAX_DECORATOR_LINES = 200;
 /** Líneas que se miran tras un decorador para encontrar la declaración de la clase. */
@@ -343,7 +346,7 @@ export class FlowRefValidator {
   }
 
   /** Rangos [inicio, fin] (1-based) del cuerpo de cada declaración de la función; vacío si no se localiza. */
-  private functionBodies(lines: string[], fn: string, ext: string): [number, number][] {
+  functionBodies(lines: string[], fn: string, ext: string): [number, number][] {
     if (!fn) return [];
     const name = escapeRe(fn);
     if (ext === 'py') {
@@ -380,6 +383,27 @@ export class FlowRefValidator {
       out.push([start, range[1]]);
     }
     return out;
+  }
+
+  /**
+   * Método más externo (≤ `maxLines` líneas) que contiene las líneas [from, to] (1-based), buscando hacia arriba hasta
+   * 300 líneas. Solo lenguajes con llaves; `null` si no se localiza. Con callbacks anidados (`setTimeout(`) gana el método.
+   */
+  enclosingFunction(lines: string[], from: number, to: number, ext: string, maxLines: number): [number, number] | null {
+    if (!BRACE_LANGS.has(ext) || from < 1 || to < from || from > lines.length) return null;
+    const last = Math.min(to, lines.length);
+    let best: [number, number] | null = null;
+    for (let n = Math.min(from, lines.length); n >= Math.max(1, from - 300); n--) {
+      const m = lines[n - 1].match(DECLARATION_LINE);
+      if (!m || NOT_DECLARATION.test(lines[n - 1]) || NOT_DECLARATION_NAME.has(m[1])) continue;
+      const range = this.braceBody(lines, n - 1);
+      if (!range) continue;
+      let start = range[0];
+      while (start > 1 && /^\s*@[\w.]+/.test(lines[start - 2])) start--;
+      if (start > from || range[1] < last || range[1] - start + 1 > maxLines) continue;
+      if (!best || range[1] - start > best[1] - best[0]) best = [start, range[1]];
+    }
+    return best;
   }
 
   /** Desde la declaración en `start` (0-based), cuerpo por conteo de llaves (sin cadenas ni comentarios de línea). */

@@ -55,8 +55,9 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
    * Propuestas que llegan con el flujo: saneadas, con rutas resueltas de forma estricta y permitidas, cada bloque
    * encajado contra el archivo real (`oldStart` corregido, números de línea y contadores) y el `baseHash` del contenido
    * leído (igual que `proposalFromResponse` de chatFront). Las inválidas se omiten con un aviso en la consola.
+   * Con `refresh = false` no avisa al servicio del flujo (el llamador abre el flujo y lo refresca después).
    */
-  async load(raw: unknown[], flow: FlowDiagram | null): Promise<void> {
+  async load(raw: unknown[], flow: FlowDiagram | null, refresh = true): Promise<void> {
     this.snapshots.clear();
     this.running.clear();
     const list: ChangeProposal[] = [];
@@ -69,7 +70,7 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
       }
     }
     this.proposals = list;
-    this.flow.refreshChange();
+    if (refresh) this.flow.refreshChange();
   }
 
   private async fromRaw(raw: unknown, flow: FlowDiagram | null, loaded: ChangeProposal[]): Promise<ChangeProposal | null> {

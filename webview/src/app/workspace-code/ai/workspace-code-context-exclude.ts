@@ -1,7 +1,8 @@
 /** Copia de las exclusiones de chatFront services/workspace-code-ai-context.ts. */
 
 
-const EXCLUDED_DIRS = new Set(['node_modules', 'dist', 'build', 'target', 'out', '.git', '.angular', '.next', 'coverage', 'vendor', '__pycache__', '.idea', '.vscode']);
+const EXCLUDED_DIRS = new Set(['node_modules', 'dist', 'build', 'target', 'out', '.git', '.angular', '.next', 'coverage', 'vendor', '__pycache__', '.idea', '.vscode',
+  '.m2', '.gradle', '.venv', 'venv', '.pnpm-store', '.cache', '.vscode-test', 'obj', '.nuxt', '.svelte-kit', '.turbo', '.parcel-cache', '.terraform']);
 const LOCKFILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'composer.lock', 'poetry.lock', 'cargo.lock', 'gemfile.lock']);
 const EXCLUDED_EXTENSIONS = new Set([
   // imágenes
@@ -14,6 +15,9 @@ const EXCLUDED_EXTENSIONS = new Set([
   'zip', 'gz', 'tgz', 'rar', '7z', 'tar', 'bz2', 'xz', 'jar', 'war', 'ear', 'pdf',
   // binarios
   'exe', 'dll', 'so', 'dylib', 'bin', 'class', 'o', 'obj', 'a', 'lib', 'pyc', 'pyo', 'wasm', 'db', 'sqlite', 'sqlite3', 'dat',
+  // artefactos, checksums, documentos y multimedia pesados
+  'pom', 'sha1', 'sha256', 'sha512', 'md5', 'asc', 'repositories', 'lastupdated', 'pdb', 'nupkg', 'ser', 'log',
+  'm4v', 'wmv', 'flv', 'opus', 'iso', 'dmg', 'msi', 'apk', 'aab', 'ipa', 'docx', 'xlsx', 'pptx', 'glb', 'parquet',
 ]);
 
 /** Ruta con algún segmento de directorio excluido (dependencias, salidas de build…); no mira extensión ni lockfiles. */

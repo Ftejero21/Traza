@@ -23,7 +23,7 @@ import {
   SnippetView,
 } from '../ai/nexo-ia.types';
 import { CaseComparison, ChangeCompareResponse, ChangeProposal, DiffHunk, FileChange } from '../ai/nexo-ia.changes.types';
-import { applyFileChange, caseTouchedByChange, compareTag, resolveChangeTarget, sortCases } from '../ai/workspace-code-ai-change-patch';
+import { applyFileChange, caseTouchedByChange, changeCasePresets, compareTag, resolveChangeTarget, sortCases } from '../ai/workspace-code-ai-change-patch';
 import { maskConfigSecrets, maskSensitiveJson } from '../ai/workspace-code-ai-mask';
 import { FlowRefValidator, isDecoratorFunctionName, refKey } from '../ai/workspace-code-flow-ref-validator';
 import { WorkspaceCodeFlowPlayer } from '../ai/workspace-code-flow-player';
@@ -49,9 +49,23 @@ const MAX_WINDOWS = 24;
 const MAX_WINDOW_CHARS = 8000;
 const MAX_CODE_CHARS = 120000;
 const MAX_CONTEXT_BASE64 = 390000;
-/** Simular cambios: radios (líneas) alrededor de cada bloque del diff, del mayor al menor si la ventana no cabe. */
-const CHANGE_RADII = [15, 10, 5];
+/**
+ * Simular cambios: intentos (radio en líneas alrededor de cada bloque del diff y si se añaden el método que lo contiene,
+ * los métodos locales llamados y la plantilla hermana), del mayor al menor si la ventana no cabe. El último reproduce
+ * el comportamiento original (radio 5, sin expansiones).
+ */
+const COMPARE_ATTEMPTS: { radius: number; bodies: boolean }[] = [{ radius: 15, bodies: true }, { radius: 10, bodies: true }, { radius: 5, bodies: false }];
 const MAX_COMPARE_CASES = 7;
+const MAX_CHANGE_BODY_LINES = 160;
+const MAX_LOCAL_BODY_LINES = 80;
+const MAX_LOCAL_CALLS = 4;
+const TEMPLATE_RADIUS = 10;
+const MAX_TEMPLATE_SPANS = 3;
+const MAX_TEMPLATE_MATCHES = 12;
+const MAX_REF_BODY_LINES = 160;
+/** Nombres que no son métodos locales al buscar llamadas en las líneas cambiadas. */
+const NOT_LOCAL_CALLS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'await', 'new', 'throw', 'typeof', 'super', 'this', 'require', 'import',
+  'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval', 'parseInt', 'parseFloat', 'String', 'Number', 'Boolean', 'Array', 'Object', 'Promise', 'Error', 'Date', 'JSON', 'Math']);
 /** Pausa entre el final de «Antes» y el inicio de «Después». */
 const BEFORE_AFTER_GAP_MS = 1100;
 /** Modo «Base de datos» (DB_MAP): contexto barato, sin volver a investigar. */
@@ -115,6 +129,12 @@ interface FlowDbConnection {
 }
 
 /** Error de contexto de la comparación con un mensaje ya traducido. */
+/** Ampliación del contexto de un archivo modificado: método que contiene el bloque, métodos locales llamados y plantilla hermana. */
+interface ChangeExpansion {
+  spans: [number, number][];
+  template: { file: WorkspaceCodeFile; spans: [number, number][] } | null;
+}
+
 class ChangeContextError extends Error {
   constructor(message: string) {
     super(message);
@@ -245,6 +265,10 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Comparación antes/después: petición propia (no la cancelan los cambios de datos de Simular datos). */
   private compareRunId = 0;
   private comparePendingId: string | null = null;
+  /** Propuesta de la última comparación lanzada (evita relanzar la auto-comparación mientras sigue en curso). */
+  private compareProposalId: string | null = null;
+  /** Propuestas cuya auto-comparación terminó en error: solo se relanzan a mano. */
+  private readonly autoCompareFailed = new Set<string>();
   private compareResolve: ((outcome: CompareOutcome) => void) | null = null;
   /** Secuencia «Simular antes y después» en curso. */
   private sequence = false;
@@ -289,7 +313,10 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.cancelSequence();
     this.player.reset();
     const sameFlow = this.flow?.id === sanitized.id;
-    if (!sameFlow) this.cancelCompare();
+    if (!sameFlow) {
+      this.cancelCompare();
+      this.autoCompareFailed.clear();
+    }
     // Mapa de datos: se cancela la carga al cambiar de flujo o de modo; con el mismo flujo se conservan la vista y la caché.
     if (!sameFlow || mode !== 'db') this.stopDbRequest();
     if (sameFlow && !sanitized.dbMap && this.flow?.dbMap) sanitized.dbMap = this.flow.dbMap;
@@ -313,6 +340,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       changeCase: keep?.changeCase ?? null,
       changeSide: keep?.changeSide ?? 'before',
       changeBusy: keep?.changeBusy ?? false,
+      changeError: keep?.changeError ?? null,
+      changeErrorAction: keep?.changeErrorAction ?? null,
     };
     this.resultSnippet = null;
     this.savedViews = {};
@@ -774,7 +803,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
    * referencias. Devuelve también cuántas ventanas fijas hay al principio.
    */
   private async codeWindowsWith(flow: FlowDiagram, pinned: PinnedSpans = new Map(), extra: PinnedSpans = new Map(),
-    radius = WINDOW_RADIUS): Promise<{ windows: CodeWindow[]; pinned: number }> {
+    radius = WINDOW_RADIUS, wholeFunctions = false): Promise<{ windows: CodeWindow[]; pinned: number }> {
     const validator = await this.validator();
     const out: CodeWindow[] = [];
     let total = 0;
@@ -797,7 +826,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       ...flow.steps.map((s) => s.ref).filter((r): r is CodeRef => !!r),
       ...flow.steps.map((s) => s.snippet?.ref).filter((r): r is CodeRef => !!r),
       ...flow.files,
-    ].filter((r) => r.verification !== 'unverified');
+    ].filter((r) => wholeFunctions || r.verification !== 'unverified');
     const ranges = new Map<string, { file: WorkspaceCodeFile; spans: [number, number][] }>();
     for (const { file, spans } of extra.values()) {
       if (!validator.usable(file)) continue;
@@ -807,8 +836,12 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       const file = validator.resolveFile(ref);
       if (!validator.usable(file)) continue;
       const entry = ranges.get(file.id) ?? { file, spans: [] };
-      entry.spans.push([Math.max(1, ref.line - radius), ref.line + radius]);
-      ranges.set(file.id, entry);
+      if (ref.verification !== 'unverified') entry.spans.push([Math.max(1, ref.line - radius), ref.line + radius]);
+      if (wholeFunctions) {
+        const body = await this.refFunctionBody(validator, file, ref);
+        if (body) entry.spans.push([Math.max(1, body[0] - 2), body[1] + 1]);
+      }
+      if (entry.spans.length) ranges.set(file.id, entry);
     }
     for (const { file, spans } of ranges.values()) {
       const lines = await validator.linesOf(file);
@@ -829,6 +862,19 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       }
     }
     return { windows: out, pinned: pinnedCount };
+  }
+
+  /** Función completa (≤ `MAX_REF_BODY_LINES`) de una referencia: la que contiene su línea o, si ninguna, la más cercana. */
+  private async refFunctionBody(validator: FlowRefValidator, file: WorkspaceCodeFile, ref: CodeRef): Promise<[number, number] | null> {
+    const fn = String(ref.functionName ?? '').trim();
+    if (!fn || isDecoratorFunctionName(fn) || fn === 'template' || fn === 'styles') return null;
+    const lines = await validator.linesOf(file);
+    if (!lines) return null;
+    const bodies = validator.functionBodies(lines, fn, file.extension.toLowerCase());
+    if (!bodies.length) return null;
+    const distance = (b: [number, number]): number => (ref.line < b[0] ? b[0] - ref.line : ref.line > b[1] ? ref.line - b[1] : 0);
+    const body = bodies.reduce((best, b) => (distance(b) < distance(best) ? b : best));
+    return body[1] - body[0] + 1 <= MAX_REF_BODY_LINES ? body : null;
   }
 
   /** El flujo tal cual se validó (sin fragmentos resueltos ni marcas de verificación). */
@@ -982,6 +1028,24 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.emit();
   }
 
+  /**
+   * Lanza solo la comparación de la propuesta activa (la `pending` más reciente) al entrar en «Simular cambios».
+   * No repite si ya hay comparación o una en curso para esa propuesta, ni tras un error (queda «Reintentar»).
+   */
+  autoCompareActiveChange(): void {
+    if (this.ui.mode !== 'changes') return;
+    const active = this.activeChange;
+    if (!active) return;
+    const proposal = active.proposal;
+    if (proposal.status !== 'pending' || proposal.flowId !== this.flow?.id) return;
+    if (this.ui.comparison?.proposalId === proposal.id) return;
+    if (this.ui.changeBusy && this.compareProposalId === proposal.id) return;
+    if (this.autoCompareFailed.has(proposal.id)) return;
+    void this.compareChange(proposal).then((outcome) => {
+      if (outcome.status === 'error') this.autoCompareFailed.add(proposal.id);
+    });
+  }
+
   caseData(id: string | null): Required<CaseComparison> | null {
     const comparison = this.ui.comparison;
     if (!comparison || !id) return null;
@@ -1002,6 +1066,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.cancelCompare();
     this.cancelSequence();
     const runId = ++this.compareRunId;
+    this.compareProposalId = proposal.id;
     this.player.reset();
     this.ui = { ...this.ui, changeBusy: true, changeError: null, changeErrorAction: null, comparison: null, changeCase: null, changeSide: 'before', resultVisible: false };
     this.emit();
@@ -1052,7 +1117,9 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     const flow = this.flow;
     if (!flow || flow.id !== flowId) return { status: 'cancelled' };
     if (!response || !response.success || !response.comparison) return fail(response?.mensaje || this.i18n.t('aiChange.compareFailed'));
-    const presets = new Map(flow.simulationPresets.map((p) => [p.id, p]));
+    // Los casos sintéticos de la propuesta (`change-N`) no están en el flujo local: se resuelven igual que al enviarlos.
+    const allPresets = [...changeCasePresets(flow, proposal, MAX_COMPARE_CASES), ...flow.simulationPresets];
+    const presets = new Map(allPresets.map((p) => [p.id, p]));
     const cases: Required<CaseComparison>[] = [];
     for (const item of Array.isArray(response.comparison.cases) ? response.comparison.cases : []) {
       const preset = presets.get(String(item?.presetId ?? ''));
@@ -1063,7 +1130,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       cases.push({ preset, before, after, tag: compareTag(before, after, caseTouchedByChange(flow, proposal.files, before, after)) });
     }
     if (!cases.length) return fail(this.i18n.t('ai.error.schema'));
-    const sorted = sortCases(cases, flow.simulationPresets);
+    const sorted = sortCases(cases, allPresets);
     const initial = sorted.find((c) => c.tag === 'regression') ?? sorted.find((c) => c.tag === 'fixed') ?? sorted[0];
     this.ui = {
       ...this.ui,
@@ -1084,12 +1151,13 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   private async compareContext(flow: FlowDiagram, proposal: ChangeProposal): Promise<string> {
     const validator = await this.validator();
     const mounts = this.project.project.mounts;
-    const targets: { file: WorkspaceCodeFile | null; change: FileChange; path: string; hunks: DiffHunk[] }[] = [];
+    const targets: { file: WorkspaceCodeFile | null; change: FileChange; path: string; hunks: DiffHunk[]; lines: string[] | null }[] = [];
     for (const change of proposal.files) {
       const target = resolveChangeTarget(mounts, (path) => this.project.fileByPath(path), change);
       if (!target) throw new ChangeContextError(this.i18n.t('aiChange.notAllowed'));
       const file = this.project.fileByPath(target.path) ?? null;
       let hunks = change.hunks;
+      let fileLines: string[] | null = null;
       if (change.status !== 'added') {
         if (!validator.usable(file)) throw new ChangeContextError(this.i18n.t('aiChange.notAllowed'));
         const lines = await validator.linesOf(file);
@@ -1098,12 +1166,16 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
         const applied = applyFileChange(lines.join('\n'), change);
         if (!applied.ok) throw new ChangeContextError(this.i18n.t('aiChange.invalidDiff'));
         hunks = applied.hunks;
+        fileLines = lines;
       }
-      targets.push({ file, change, path: target.path, hunks });
+      targets.push({ file, change, path: target.path, hunks, lines: fileLines });
     }
-    const cases = flow.simulationPresets.slice(0, MAX_COMPARE_CASES)
-      .map((p) => ({ presetId: p.id, input: maskSensitiveJson(this.presetInput(p)) }));
+    // Solo los casos en los que se nota el cambio; los sintéticos (`change-N`) viajan dentro del flujo (el host rechaza ids desconocidos).
+    const presets = changeCasePresets(flow, proposal, MAX_COMPARE_CASES);
+    const cases = presets.map((p) => ({ presetId: p.id, input: maskSensitiveJson(this.presetInput(p)) }));
     if (!cases.length) throw new ChangeContextError(this.i18n.t('aiChange.compareFailed'));
+    const known = new Set(flow.simulationPresets.map((p) => p.id));
+    const backendFlow = { ...this.flowForBackend(flow), simulationPresets: [...flow.simulationPresets, ...presets.filter((p) => !known.has(p.id))] };
     const files = targets.map((t) => ({
       path: t.path,
       status: t.change.status,
@@ -1113,7 +1185,11 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
         lines: h.lines.map((l) => ({ kind: l.kind, text: maskConfigSecrets(t.path, l.text) })),
       })),
     }));
-    for (const radius of CHANGE_RADII) {
+    const expansions = new Map<string, ChangeExpansion>();
+    for (const t of targets) {
+      if (t.file && t.lines && t.change.status === 'modified') expansions.set(t.file.id, await this.changeExpansion(validator, t.file, t.lines, t.hunks, targets));
+    }
+    for (const { radius, bodies } of COMPARE_ATTEMPTS) {
       const pinned: PinnedSpans = new Map();
       const extra: PinnedSpans = new Map();
       for (const t of targets) {
@@ -1126,16 +1202,98 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
         const bucket = t.change.status === 'modified' ? pinned : extra;
         const entry = bucket.get(t.file.id) ?? { file: t.file, spans: [] };
         entry.spans.push(...spans);
+        const expansion = bodies ? expansions.get(t.file.id) : undefined;
+        if (expansion) {
+          entry.spans.push(...expansion.spans);
+          if (expansion.template) {
+            const tpl = extra.get(expansion.template.file.id) ?? { file: expansion.template.file, spans: [] };
+            tpl.spans.push(...expansion.template.spans);
+            extra.set(expansion.template.file.id, tpl);
+          }
+        }
         bucket.set(t.file.id, entry);
       }
       try {
-        const { windows, pinned: keep } = await this.codeWindowsWith(flow, pinned, extra);
-        return this.encode({ flowId: flow.id, flow: this.flowForBackend(flow), code: windows, files, cases, title: proposal.title, summary: proposal.summary }, keep);
+        const { windows, pinned: keep } = await this.codeWindowsWith(flow, pinned, extra, WINDOW_RADIUS, bodies);
+        return this.encode({ flowId: flow.id, flow: backendFlow, code: windows, files, cases, title: proposal.title, summary: proposal.summary }, keep);
       } catch (error: unknown) {
         if (!(error instanceof WindowTooLargeError)) throw error;
       }
     }
     throw new WindowTooLargeError();
+  }
+
+  /**
+   * Qué más necesita ver la IA para razonar el antes/después de un archivo modificado: el método completo que contiene
+   * cada bloque, los métodos locales que llaman las líneas cambiadas y las líneas de la plantilla `.html` hermana que
+   * usan sus miembros. Solo archivos permitidos (`usable`).
+   */
+  private async changeExpansion(validator: FlowRefValidator, file: WorkspaceCodeFile, lines: string[], hunks: DiffHunk[],
+    targets: { file: WorkspaceCodeFile | null }[]): Promise<ChangeExpansion> {
+    const ext = file.extension.toLowerCase();
+    const spans: [number, number][] = [];
+    const thisCalls: string[] = [];
+    const plainCalls: string[] = [];
+    for (const h of hunks) {
+      let old = h.oldStart;
+      let first = 0;
+      let last = 0;
+      for (const l of h.lines) {
+        if (l.kind === 'context') {
+          old++;
+          continue;
+        }
+        const at = Math.min(Math.max(1, old), lines.length);
+        first = first ? Math.min(first, at) : at;
+        last = Math.max(last, at);
+        if (l.kind === 'del') old++;
+        for (const m of l.text.matchAll(/\bthis\.(\w+)\s*\(/g)) if (!thisCalls.includes(m[1])) thisCalls.push(m[1]);
+        for (const m of l.text.matchAll(/(^|[^.\w$])(\w+)\s*\(/g)) if (!plainCalls.includes(m[2])) plainCalls.push(m[2]);
+      }
+      if (!first) continue;
+      const enclosing = validator.enclosingFunction(lines, first, last, ext, MAX_CHANGE_BODY_LINES);
+      if (enclosing) spans.push([Math.max(1, enclosing[0] - 2), enclosing[1] + 2]);
+    }
+    const names = [...thisCalls, ...plainCalls].filter((n) => !NOT_LOCAL_CALLS.has(n)).slice(0, MAX_LOCAL_CALLS);
+    const members: string[] = [];
+    for (const name of names) {
+      for (const [start, end] of validator.functionBodies(lines, name, ext)) {
+        if (end - start + 1 > MAX_LOCAL_BODY_LINES) continue;
+        spans.push([start, end]);
+        for (const line of lines.slice(start - 1, end)) {
+          for (const m of line.matchAll(/\bthis\.(\w+)/g)) if (!members.includes(m[1])) members.push(m[1]);
+        }
+      }
+    }
+    let template: ChangeExpansion['template'] = null;
+    const identifiers = [...new Set([...names, ...members])].filter((n) => n.length >= 4);
+    if (ext === 'ts' && identifiers.length) {
+      const html = this.project.fileByPath(file.path.replace(/\.ts$/, '.html'));
+      if (html && html.id !== file.id && !targets.some((t) => t.file?.id === html.id) && validator.usable(html)) {
+        const htmlLines = await validator.linesOf(html);
+        if (htmlLines) {
+          const found = identifiers.map((id, order) => {
+            const re = new RegExp(`\\b${id}\\b`);
+            const at: number[] = [];
+            htmlLines.forEach((text, i) => {
+              if (re.test(text)) at.push(i + 1);
+            });
+            return { order, at };
+          }).filter((f) => f.at.length >= 1 && f.at.length <= MAX_TEMPLATE_MATCHES)
+            .sort((a, b) => a.at.length - b.at.length || a.order - b.order);
+          const tplSpans: [number, number][] = [];
+          for (const f of found) {
+            for (const n of f.at) {
+              if (tplSpans.length >= MAX_TEMPLATE_SPANS) break;
+              if (tplSpans.some(([a, b]) => n >= a && n <= b)) continue;
+              tplSpans.push([Math.max(1, n - TEMPLATE_RADIUS), n + TEMPLATE_RADIUS]);
+            }
+          }
+          if (tplSpans.length) template = { file: html, spans: tplSpans };
+        }
+      }
+    }
+    return { spans, template };
   }
 
   /** Selecciona un caso de la tabla: cancela la secuencia y deja el lado actual pausado en su paso final. */

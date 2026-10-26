@@ -1,13 +1,20 @@
 /**
  * Chat participant `@traza` (id `traza.flow`): sin comando o con `/flujo` genera el flujo con el modelo del chat y lo
- * abre en el panel; `/cambio` propone un cambio sobre el flujo abierto. Los textos de la IA se escapan antes de
- * mostrarse y nunca llevan enlaces de comando confiables.
+ * abre en el panel; `/cambio` (o un texto que se detecta como petición de cambio) genera o reutiliza el flujo, propone
+ * el cambio y lo abre en «Simular cambios». Los textos de la IA se escapan antes de mostrarse y nunca llevan enlaces de
+ * comando confiables.
  */
 import * as vscode from 'vscode';
 import { FlowPanel } from './flow-panel';
+import { runChangeRequest } from './host-change';
 import { isCancelled, type HostAi } from './host-ai';
 import type { PinnedRef } from './host-context';
-import { escapeMarkdown, failLocation, formatFlowChatMarkdown, isScenarioQuestion, isSpanish, oneLine, resolveFlowFolder } from './host-flow-summary';
+import {
+  escapeMarkdown, failLocation, formatChangeChatMarkdown, formatFlowChatMarkdown, isChangeRequest, isScenarioQuestion, isSpanish,
+  oneLine, resolveFlowFolder,
+} from './host-flow-summary';
+
+const FLOW_ID = /^[0-9a-f-]{36}$/i;
 
 function referencesOf(request: vscode.ChatRequest): PinnedRef[] {
   const out: PinnedRef[] = [];
@@ -30,32 +37,33 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
     const prompt = request.prompt.trim();
     if (!prompt) {
       stream.markdown(es
-        ? 'Escribe qué proceso quieres ver, por ejemplo: `@traza ¿cómo funciona el login?`.  \nCon `/cambio <petición>` propongo un cambio sobre el flujo abierto.'
-        : 'Describe the process you want to see, for example: `@traza how does login work?`.  \nWith `/cambio <request>` I propose a change on the open flow.');
+        ? 'Escribe qué proceso quieres ver, por ejemplo: `@traza ¿cómo funciona el login?`.  \nCon `/cambio <petición>` propongo un cambio (genero el flujo si hace falta) y lo abro en «Simular cambios».'
+        : 'Describe the process you want to see, for example: `@traza how does login work?`.  \nWith `/cambio <request>` I propose a change (generating the flow if needed) and open it in "Simular cambios".');
       return {};
     }
     try {
-      if (request.command === 'cambio') {
-        const current = FlowPanel.currentFlow();
-        if (!current) {
-          stream.markdown(es
-            ? 'No hay ningún flujo abierto. Genera uno con `@traza <pregunta>` o abre uno con «Traza: Flujo».'
-            : 'No flow is open. Generate one with `@traza <question>` or open one with "Traza: Flujo".');
-          return {};
-        }
-        stream.progress(es ? 'Preparando el cambio…' : 'Preparing the change…');
-        const result = await ai.proposeChange({
-          question: prompt, flow: current.flow, model: request.model, pinned: referencesOf(request), token,
+      const isChange = request.command === 'cambio' || (request.command !== 'flujo' && isChangeRequest(prompt));
+      if (isChange) {
+        const changeFolder = resolveFlowFolder(prompt);
+        const result = await runChangeRequest(context, ai, {
+          request: prompt, model: request.model, pinned: referencesOf(request), useActiveEditor: true, token,
           progress: (message) => stream.progress(message),
+          ...(changeFolder ? { folder: changeFolder.name } : {}),
         });
-        if ('answer' in result) {
-          stream.markdown(escapeMarkdown(result.answer));
+        const flowId = FLOW_ID.test(result.flowId) && ai.flowById(result.flowId) ? result.flowId : '';
+        if (result.kind === 'answer') {
+          stream.markdown(escapeMarkdown(oneLine(result.answer, 4000)));
+          if (result.generated) {
+            stream.markdown(`\n\n${formatFlowChatMarkdown(result.generated)}`);
+            if (flowId) stream.button({ command: 'traza.showFlow', arguments: [{ flowId }], title: es ? 'Visualizar flujo' : 'Visualize flow' });
+          }
           return {};
         }
-        FlowPanel.addProposal(result.proposal);
-        const title = typeof result.proposal['title'] === 'string' ? result.proposal['title'] : '';
-        const summary = typeof result.proposal['summary'] === 'string' ? result.proposal['summary'] : '';
-        stream.markdown(`**${escapeMarkdown(title)}**\n\n${escapeMarkdown(summary)}`);
+        stream.markdown(formatChangeChatMarkdown(result));
+        if (flowId) {
+          stream.button({ command: 'traza.showFlow', arguments: [{ flowId, mode: 'changes' }], title: es ? 'Ver cambios' : 'View changes' });
+          stream.button({ command: 'traza.showFlow', arguments: [{ flowId }], title: es ? 'Visualizar flujo' : 'Visualize flow' });
+        }
         return {};
       }
       const folder = resolveFlowFolder(prompt);

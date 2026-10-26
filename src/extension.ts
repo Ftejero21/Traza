@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { FlowPanel } from './flow-panel';
 import { HostAi, isCancelled, type GeneratedFlow } from './host-ai';
+import { runChangeRequest } from './host-change';
 import { registerChatParticipant } from './host-chat';
 import { registerDbCommands } from './host-db';
 import { migrateLegacySettings } from './host-migration';
@@ -124,10 +125,19 @@ function showGenerated(context: vscode.ExtensionContext, ai: HostAi, generated: 
 function showFlow(context: vscode.ExtensionContext, ai: HostAi, arg?: unknown): void {
   const es = (vscode.workspace.getConfiguration('traza').get<string>('language') ?? 'es') !== 'en';
   const raw = arg && typeof arg === 'object' && !Array.isArray(arg) ? (arg as { flowId?: unknown }).flowId : undefined;
+  const mode = arg && typeof arg === 'object' && !Array.isArray(arg) ? (arg as { mode?: unknown }).mode : undefined;
   let generated: GeneratedFlow | null;
   if (arg === undefined || arg === null) generated = ai.lastGenerated;
   else generated = typeof raw === 'string' && FLOW_ID.test(raw) ? ai.flowById(raw) : null;
   if (generated) {
+    const id = typeof raw === 'string' ? raw : '';
+    const saved = mode === 'changes' && id ? ai.proposalsFor(id) : [];
+    if (saved.length > 0) {
+      FlowPanel.show(context, ai, {
+        flow: generated.flow, sample: false, title: generated.title, proposals: saved, source: { model: generated.model }, mode: 'changes',
+      });
+      return;
+    }
     showGenerated(context, ai, generated);
     return;
   }
@@ -155,25 +165,22 @@ async function generateFlow(context: vscode.ExtensionContext, ai: HostAi): Promi
   }
 }
 
-/** «Traza: Proponer cambio»: sobre el flujo abierto (no el de ejemplo); la propuesta se añade a «Simular cambios». */
-async function proposeChange(ai: HostAi): Promise<void> {
-  const current = FlowPanel.currentFlow();
-  if (!current) {
-    void vscode.window.showWarningMessage('Abre o genera un flujo (que no sea el de ejemplo) antes de proponer un cambio.');
+/** «Traza: Proponer cambio»: genera o reutiliza el flujo, propone el cambio y lo abre en «Simular cambios» (solo simula). */
+async function proposeChange(context: vscode.ExtensionContext, ai: HostAi): Promise<void> {
+  if (!(vscode.workspace.workspaceFolders ?? []).length) {
+    void vscode.window.showErrorMessage('Abre una carpeta del proyecto para proponer un cambio.');
     return;
   }
-  const question = await askQuestion('Traza: Proponer cambio', '¿Qué cambio quieres en este flujo?');
+  const question = await askQuestion('Traza: Proponer cambio', '¿Qué cambio quieres? (se genera el flujo si no hay uno relacionado abierto)');
   if (!question) return;
   try {
     const result = await vscode.window.withProgress(
       { location: vscode.ProgressLocation.Notification, title: 'Traza: proponiendo cambio', cancellable: true },
-      (progress, token) => ai.proposeChange({ question, flow: current.flow, token, progress: (message) => progress.report({ message }) }),
+      (progress, token) => runChangeRequest(context, ai, {
+        request: question, pinned: [], useActiveEditor: true, token, progress: (message) => progress.report({ message }),
+      }),
     );
-    if ('answer' in result) {
-      void vscode.window.showInformationMessage(result.answer.slice(0, 1000));
-      return;
-    }
-    if (!FlowPanel.addProposal(result.proposal)) void vscode.window.showWarningMessage('El panel del flujo se ha cerrado.');
+    if (result.kind === 'answer') void vscode.window.showInformationMessage(result.answer.slice(0, 1000));
   } catch (error: unknown) {
     showError(error);
   }
@@ -186,7 +193,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('traza.openFlow', () => openFlow(context, ai)),
     vscode.commands.registerCommand('traza.openSampleFlow', () => FlowPanel.show(context, ai, { flow: null, sample: true, title: SAMPLE_TITLE, proposals: [] })),
     vscode.commands.registerCommand('traza.generateFlow', () => generateFlow(context, ai)),
-    vscode.commands.registerCommand('traza.proposeChange', () => proposeChange(ai)),
+    vscode.commands.registerCommand('traza.proposeChange', () => proposeChange(context, ai)),
     vscode.commands.registerCommand('traza.selectModel', () => ai.selectModelCommand()),
     vscode.commands.registerCommand('traza.showLastFlow', () => {
       const last = ai.lastGenerated;

@@ -36,6 +36,13 @@ export interface FileChange {
   deletions: number;
 }
 
+/** Caso del flujo activo en el que se nota el cambio (`presetId` null = caso nuevo con su `input`). */
+export interface ChangeCase {
+  presetId: string | null;
+  label: string;
+  input: unknown;
+}
+
 export interface ChangeProposal {
   id: string;
   /** Mensaje del usuario que lo originó. */
@@ -48,6 +55,8 @@ export interface ChangeProposal {
   flowId: string | null;
   /** Riesgos o efectos secundarios que la IA ha detectado. */
   risks: string[];
+  /** De 1 a 3 casos del flujo activo en los que se nota el cambio (ausente en propuestas antiguas). */
+  cases?: ChangeCase[];
   status: 'pending' | 'applied' | 'discarded' | 'conflict';
   createdAt: string;
 }
