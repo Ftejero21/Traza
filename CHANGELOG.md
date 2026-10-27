@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3 (Preview)
+
+- «Base de datos» → «Reintentar»: si el flujo trae la SQL que generó la IA, se envía como punto de partida y se contrasta con el código, que es el que manda. Si no la trae, la IA la busca leyendo la clase o función del paso de datos y la del paso anterior.
+- Las constantes, concatenaciones, `String.format`, `@Table(name = Clase.CONST)` y `${…}` de properties/YAML se resuelven hasta el nombre real de tabla y columna. Si la respuesta trae una constante sin resolver (`Tablas.PEDIDOS`, `TABLA_PEDIDOS`, `COL_ID`…), se le vuelve a pedir.
+
 ## 0.1.2 (Preview)
 
 - Con `@traza`, la IA responde en el chat a la pregunta con un texto de resumen, seguido del recorrido una sola vez y el botón «Visualizar flujo». Si lo necesita, puede seguir buscando y leyendo el código para contestar.

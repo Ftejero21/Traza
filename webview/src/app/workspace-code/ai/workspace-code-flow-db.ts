@@ -78,6 +78,28 @@ export function dbSourceSeeds(flow: FlowDiagram, max = 8): { mountId: string; fi
   return out;
 }
 
+const SQL_LANGUAGE = /sql|jpql|hql/i;
+
+/**
+ * SQL que la IA devolvió en el flujo (`generatedCode`) de los pasos `sql` o con lenguaje SQL/JPQL/HQL (no `http` ni JSON):
+ * como mucho `max` entradas, sin `stepId` repetido y con el código recortado a `maxChars`.
+ */
+export function dbFlowSql(flow: FlowDiagram, max = 8, maxChars = 2000): { stepId: string; code: string }[] {
+  const out: { stepId: string; code: string }[] = [];
+  const seen = new Set<string>();
+  for (const step of flow.steps) {
+    if (out.length >= max) break;
+    if (step.kind === 'http' || seen.has(step.id)) continue;
+    const generated = step.generatedCode;
+    const code = generated?.code?.trim();
+    if (!generated || !code) continue;
+    if (step.kind !== 'sql' && !SQL_LANGUAGE.test(generated.language ?? '')) continue;
+    seen.add(step.id);
+    out.push({ stepId: step.id, code: code.slice(0, maxChars) });
+  }
+  return out;
+}
+
 /** Entidades de los repositorios genéricos (`JpaRepository<User, Long>` → `User`), como mucho 4. */
 export function repositoryEntities(texts: string[]): string[] {
   const out: string[] = [];

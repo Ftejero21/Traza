@@ -28,7 +28,7 @@ import { maskConfigSecrets, maskSensitiveJson } from '../ai/workspace-code-ai-ma
 import { FlowRefValidator, isDecoratorFunctionName, refKey } from '../ai/workspace-code-flow-ref-validator';
 import { WorkspaceCodeFlowPlayer } from '../ai/workspace-code-flow-player';
 import { sanitizeDiagnosis, sanitizeFlowDbMap, sanitizeFlowDiagram } from '../ai/workspace-code-flow-sanitize';
-import { buildFlowDbSchema, buildFlowDbScript, candidateTableNames, dbSourceSeeds, dbStepIndexes, flowHasDb, isDbStep, repositoryEntities } from '../ai/workspace-code-flow-db';
+import { buildFlowDbSchema, buildFlowDbScript, candidateTableNames, dbFlowSql, dbSourceSeeds, dbStepIndexes, flowHasDb, isDbStep, repositoryEntities } from '../ai/workspace-code-flow-db';
 import { DbExplainScript } from '../workspace-code-db/workspace-code-db-explain';
 import { shortType } from '../workspace-code-db/workspace-code-db.util';
 import { analyzeLogs } from '../ai/workspace-code-log-analyzer';
@@ -1876,8 +1876,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       code: [],
       schema,
     };
-    // Reintento profundo: el host lee las semillas (solo lectura, enmascaradas); el webview no envía código.
-    return { contextBase64: this.encode(deep ? { ...context, code: [], seeds: dbSourceSeeds(flow), reason: deep } : { ...context, code }), conn };
+    // Reintento profundo: el host lee las semillas (solo lectura, enmascaradas); el webview no envía código, solo la SQL que la IA devolvió en el flujo.
+    return { contextBase64: this.encode(deep ? { ...context, code: [], seeds: dbSourceSeeds(flow), reason: deep, flowSql: dbFlowSql(flow) } : { ...context, code }), conn };
   }
 
   /** Extracto del esquema real: tablas candidatas y sus vecinas a un salto por FK (≤ 12, ≤ 30 columnas, PK y FK primero). */

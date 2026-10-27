@@ -86,7 +86,7 @@ Pega los logs del navegador o del servidor y pulsa **Analizar logs**. Traza cruz
 
 Si el flujo toca la base de datos, esta pestaña se prepara sola en segundo plano en cuanto se abre el flujo, así que al entrar ya está dibujada. También se reutiliza al reabrir el flujo. El diagrama de tablas se recorre al ritmo del flujo. En cada acceso ves la operación (`SELECT`, `UPDATE`…), las columnas y de dónde sale cada valor (`email ← usuarioDTO.email`), con la explicación del paso junto a su tabla. Sin conexión, se deduce de las entidades y del código. Con una conexión configurada se usa **el esquema real**, del que solo se lee la metadata.
 
-Si el mapa no se puede generar o sale vacío, **Reintentar** hace una búsqueda más profunda. La IA lee las clases de acceso a datos del flujo (repositorios, DAO, mappers, entidades) y localiza sus sentencias SQL (`@Query`, JdbcTemplate, MyBatis, archivos `.sql`…). A partir de ellas deduce las tablas, las columnas y las relaciones que hay que pintar.
+Si el mapa no se puede generar o sale vacío, **Reintentar** hace una búsqueda más profunda. La IA lee las clases de acceso a datos del flujo (repositorios, DAO, mappers, entidades) y localiza sus sentencias SQL (`@Query`, JdbcTemplate, MyBatis, archivos `.sql`…). A partir de ellas deduce las tablas, las columnas y las relaciones que hay que pintar. Si el flujo ya traía la SQL, se usa como punto de partida y se contrasta con el código. Las constantes y los `${…}` de configuración se resuelven hasta el nombre real de cada tabla y columna.
 
 ### 🔀 Simular cambios
 

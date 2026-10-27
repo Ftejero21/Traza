@@ -3,7 +3,7 @@
   "displayName": "Traza",
   "description": "Visualización del flujo de un proceso del proyecto (diagrama de secuencia, simular datos, analizar logs y proponer cambios) con el modelo de lenguaje que ya usas en VS Code. El código relevante (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.",
   "publisher": "ftejero21",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "license": "MIT",
   "author": {
     "name": "Fernando Tejero"

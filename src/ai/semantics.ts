@@ -390,6 +390,42 @@ export function dbMapErrors(map: unknown, flow: unknown): string[] {
   return limit(errors);
 }
 
+const DB_NAME_EXPRESSION = /[+"'`\s()]|\$\{|#\{/;
+const DB_NAME_CLASS_CONST = /(^|\.)[A-Z][A-Za-z0-9]*[a-z][A-Za-z0-9]*\.[A-Z][A-Z0-9_]*$/;
+const DB_NAME_CONST_PREFIX = /^(TABLA|TABLE|TABLE_NAME|COL|COLUMN|COLUMNA|CAMPO|FIELD|SQL|QUERY)_[A-Z0-9_]+$/;
+
+/** El nombre de tabla/columna parece una constante, variable o expresión sin resolver (`Tablas.PEDIDOS`, `"FROM " + T`, `${x}`, `COL_ID`). */
+function unresolvedDbName(name: string): boolean {
+  const value = name.trim();
+  return DB_NAME_EXPRESSION.test(value) || value.startsWith('this.') || DB_NAME_CLASS_CONST.test(value) || DB_NAME_CONST_PREFIX.test(value);
+}
+
+/**
+ * Solo DB_MAP_SQL: errores de formato por cada nombre de tabla o columna del mapa que parezca una constante o expresión sin
+ * resolver (tablas, columnas, relaciones y accesos). No toca `dbMapErrors`.
+ */
+export function dbMapUnresolvedNameErrors(map: unknown): string[] {
+  if (!isObj(map)) return [];
+  const errors: string[] = [];
+  const check = (value: unknown, path: string): void => {
+    if (typeof value !== 'string' || !unresolvedDbName(value)) return;
+    errors.push(`${path}: «${cut(value.trim(), 64)}» parece una constante, variable o expresión sin resolver; busca su definición (misma clase, superclase, interfaz, clase de constantes, .properties/.yml o XML) y usa el VALOR real como nombre de tabla/columna`);
+  };
+  list(map['tables']).forEach((table, i) => {
+    check(at(table, 'name'), `$.tables[${i}].name`);
+    list(at(table, 'columns')).forEach((column, j) => check(at(column, 'name'), `$.tables[${i}].columns[${j}].name`));
+  });
+  list(map['relations']).forEach((rel, i) => {
+    for (const key of ['from', 'fromColumn', 'to', 'toColumn']) check(at(rel, key), `$.relations[${i}].${key}`);
+  });
+  list(map['accesses']).forEach((access, i) => {
+    check(at(access, 'table'), `$.accesses[${i}].table`);
+    list(at(access, 'columns')).forEach((column, j) => check(column, `$.accesses[${i}].columns[${j}]`));
+    check(at(access, 'via'), `$.accesses[${i}].via`);
+  });
+  return limit(errors);
+}
+
 /* -------------------------------- UI_PLAN -------------------------------- */
 
 function uiPlanBodyErrors(body: unknown, path: string, errors: string[]): void {

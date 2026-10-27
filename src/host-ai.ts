@@ -13,7 +13,7 @@ import { afterWindows, PatchError, type ChangeFile, type CodeWindow } from './ai
 import { ANSWER_BUDGET_NOTE, ANSWER_CONTINUE_NOTE, ANSWER_EMPTY_NOTE, ANSWER_SYSTEM, answerNote, systemFor, type PromptOp } from './ai/prompts';
 import { clampToSchema, compactSchema, validate } from './ai/schema-validator';
 import {
-  changeDiff, cut, cutCss, dbMapErrors, dropInvalidScenario, flowSemantics, isObj, numbered, parseModelJson, proposeSemantics,
+  changeDiff, cut, cutCss, dbMapErrors, dbMapUnresolvedNameErrors, dropInvalidScenario, flowSemantics, isObj, numbered, parseModelJson, proposeSemantics,
   repairDbMap, repairDiagnosis, repairUiMock, repairUiPlan, txt, uiMockErrors, uiPlanErrors,
 } from './ai/semantics';
 import { AGENT_TOOLS, AgentToolSession } from './host-agent-tools';
@@ -118,6 +118,9 @@ const DB_SQL_SEED_LINES = 300;
 const DB_SQL_SEED_FILE_CHARS = 8_000;
 const DB_SQL_SCHEMA_CHARS = 12_000;
 const MAX_DB_SQL_INPUT_CHARS = 60_000;
+const MAX_DB_SQL_FLOW = 8;
+const DB_SQL_FLOW_CODE_CHARS = 2_000;
+const DB_SQL_FLOW_CHARS = 8_000;
 const FLOW_MAX_CONTEXT_CHARS = 110_000;
 const MAX_ACTIVE_FLOW_CHARS = 8000;
 const MAX_QUESTION_CHARS = 4000;
@@ -711,6 +714,30 @@ function decodeSeeds(raw: unknown, max: number, lang: NexoLanguage = language())
   });
 }
 
+/**
+ * SQL del flujo (`flowSql`, opcional): lista de como máximo `MAX_DB_SQL_FLOW` elementos {stepId, code}. La forma o el tamaño
+ * inválidos lanzan `invalid`; los vacíos o con `stepId` que no es de `flow.steps` se descartan. El código sale enmascarado.
+ */
+function decodeFlowSql(raw: unknown, flow: Obj, lang: NexoLanguage = language()): { stepId: string; code: string }[] {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw) || raw.length > MAX_DB_SQL_FLOW) throw new AiError(t('invalid', lang));
+  const steps = flow['steps'];
+  const ids = new Set<string>();
+  if (Array.isArray(steps)) for (const s of steps) if (isObj(s) && typeof s['id'] === 'string') ids.add(s['id']);
+  const out: { stepId: string; code: string }[] = [];
+  for (const item of raw) {
+    if (!isObj(item)) throw new AiError(t('invalid', lang));
+    const stepId = item['stepId'];
+    const code = item['code'];
+    if (typeof stepId !== 'string' || !stepId.trim() || stepId.length > 80 || typeof code !== 'string' || code.length > DB_SQL_FLOW_CODE_CHARS) {
+      throw new AiError(t('invalid', lang));
+    }
+    if (!code.trim() || !ids.has(stepId.trim())) continue;
+    out.push({ stepId: stepId.trim(), code: maskSensitiveText(code.trim()) });
+  }
+  return out;
+}
+
 function decodeUiMock(ctx: Obj): UiMockInput {
   if (json(ctx).length > MAX_UI_MOCK_INPUT_CHARS) throw new AiError(t('invalid'));
   const flowId = validFlowId(ctx['flowId']);
@@ -801,10 +828,19 @@ function dbMapCheck(flow: Obj): (raw: Obj) => Validation {
 }
 
 /** Texto del reintento profundo del mapa de datos, con la semilla recortada para que el total quepa en `maxChars`. */
-function buildDbSqlText(flow: Obj, reason: 'failed' | 'empty', schemaText: string, seedText: string, overview: string, lang: NexoLanguage): UserBuilder {
+function buildDbSqlText(flow: Obj, reason: 'failed' | 'empty', flowSql: { stepId: string; code: string }[], schemaText: string, seedText: string, overview: string, lang: NexoLanguage): UserBuilder {
   return (maxChars) => {
     let sb = `## FLUJO\n${json(flow)}\n\n`;
     sb += `## MOTIVO DEL REINTENTO\n${reason === 'empty' ? 'El mapa anterior salió vacío o sin tablas pintables.' : 'El mapa anterior no se pudo generar.'}\n\n`;
+    sb += '## SQL DEL FLUJO\n';
+    if (flowSql.length) {
+      let sqlText = '(punto de partida: contrástala con el código; si difiere, manda el código real y el ESQUEMA REAL; resuelve constantes y placeholders)\n';
+      for (const item of flowSql) sqlText += `### paso ${item.stepId}\n${item.code}\n`;
+      sb += sqlText.length > DB_SQL_FLOW_CHARS ? sqlText.slice(0, DB_SQL_FLOW_CHARS - TRUNC.length) + TRUNC : sqlText;
+    } else {
+      sb += '(ninguna: localiza la SQL en el código leyendo la clase/función de cada paso de datos y la del paso anterior)';
+    }
+    sb += '\n\n';
     sb += `## ESQUEMA REAL\n${schemaText}\n\n`;
     sb += `## CARPETAS DEL WORKSPACE\n${overview || '(sin datos)'}\n\n`;
     const tail = idiomaTail(lang);
@@ -1388,17 +1424,20 @@ export class HostAi {
         const d = decodeDiagnosis(ctx);
         const { schema, empty } = decodeDbSchema(ctx, lang);
         const seeds = decodeSeeds(ctx['seeds'], MAX_DB_SQL_SEEDS, lang);
+        const flowSql = decodeFlowSql(ctx['flowSql'], d.flow, lang);
         const reason: 'failed' | 'empty' = ctx['reason'] === 'empty' ? 'empty' : 'failed';
         const schemaText = empty ? '(sin conexion)' : cut(json(schema), DB_SQL_SCHEMA_CHARS);
         operation = 'DB_MAP_SQL';
         const sqlFlowId = d.flowId.slice(0, 64);
         const agentic = this.agentCapable(model);
         const t0 = Date.now();
-        trazaLog().info(`DB_MAP_SQL · flujo=${sqlFlowId} · inicio · semillas=${seeds.length} · motivo=${reason} · esquema=${empty ? 'código' : 'real'} · agente=${agentic ? 'sí' : 'no'}`);
+        trazaLog().info(`DB_MAP_SQL · flujo=${sqlFlowId} · inicio · semillas=${seeds.length} · sqlFlujo=${flowSql.length} · motivo=${reason} · esquema=${empty ? 'código' : 'real'} · agente=${agentic ? 'sí' : 'no'}`);
         const base = dbMapCheck(d.flow);
         const check = (raw: Obj): Validation => {
           const result = base(raw);
           if (result.errors.length) return result;
+          const unresolved = dbMapUnresolvedNameErrors(result.value);
+          if (unresolved.length) return { errors: unresolved };
           const map = result.value as Obj;
           const tables = map['tables'];
           const accesses = map['accesses'];
@@ -1420,7 +1459,7 @@ export class HostAi {
                 overview = session.overview();
                 return { mounts: [], mapText: '', fragments: [] };
               },
-              build: () => buildDbSqlText(d.flow, reason, schemaText, seedText, overview, lang),
+              build: () => buildDbSqlText(d.flow, reason, flowSql, schemaText, seedText, overview, lang),
               check,
             });
             if (value !== null) mode = 'agente';
@@ -1432,7 +1471,7 @@ export class HostAi {
             seedText = await this.readSeeds(session, seeds, DB_SQL_SEED_LINES, DB_SQL_SEED_FILE_CHARS);
             overview = session.overview();
             progress?.(lang === 'en' ? 'Building the data map…' : 'Construyendo el mapa de datos…');
-            const classic = await this.runJson('DB_MAP_SQL', systemFor('DB_MAP_SQL'), buildDbSqlText(d.flow, reason, schemaText, seedText, overview, lang), check, { ...opts, maxChars: MAX_DB_SQL_INPUT_CHARS });
+            const classic = await this.runJson('DB_MAP_SQL', systemFor('DB_MAP_SQL'), buildDbSqlText(d.flow, reason, flowSql, schemaText, seedText, overview, lang), check, { ...opts, maxChars: MAX_DB_SQL_INPUT_CHARS });
             value = classic.value;
             cached = classic.cached;
           }

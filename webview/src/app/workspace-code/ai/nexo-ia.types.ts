@@ -277,6 +277,8 @@ export interface FlowDbMapContext {
   /** Solo en el reintento profundo (`db-map-sql`): archivos de acceso a datos de partida (el host los lee) y motivo del reintento. */
   seeds?: { mountId: string; file: string; line: number }[];
   reason?: 'failed' | 'empty';
+  /** Solo en el reintento profundo: la SQL que la IA devolvió en el flujo (pasos `sql`, ≤ 8, cada `code` ≤ 2000 caracteres). */
+  flowSql?: { stepId: string; code: string }[];
 }
 
 /** Archivo enviado como contexto (ruta del proyecto y contenido ya enmascarado). */
