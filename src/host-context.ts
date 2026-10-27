@@ -20,7 +20,16 @@ const MAX_SELECTED = 12;
 const KEYWORD_TOP = 3;
 const MAX_FILES = 20;
 const MAX_BASE_FILES = 14;
-const MAX_REF_FILES = 6;
+const MAX_REF_FILES = 8;
+/** Referencias (Controller → Service → Repository…) máximas por carpeta cuando hay varias en juego. */
+const MAX_REF_FILES_PER_MOUNT = 4;
+/** Puente HTTP front → back: archivos del back añadidos, peticiones analizadas y archivos del front que se examinan. */
+const MAX_BRIDGE_FILES = 3;
+const MAX_HTTP_CALLS = 24;
+const MAX_BRIDGE_SOURCES = 8;
+/** FLOW multi-root: una carpeta cuenta como relevante con esta fracción de la mejor puntuación (PROPOSE mantiene 0.5). */
+const FLOW_MOUNT_RELEVANCE = 0.2;
+const KEYWORD_TOP_PER_MOUNT_FLOW = 3;
 const REF_DEPTH = 2;
 const MAX_FORCED = 6;
 const FORCED_BONUS = 30;
@@ -55,7 +64,7 @@ const ACTIVE_FULL_CHARS = 16_000;
 const ACTIVE_RADIUS = 150;
 const MAX_SELECTION_CHARS = 4000;
 const TRUNCATED = '\n…(truncado)';
-const PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+export const PRIVATE_KEY = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 /** PROPOSE: plazas de archivo reservadas para lo que mejor coincide con la petición frente a los archivos fijados del flujo. */
 const RESERVED_REQUEST_FILES = 6;
 /** Vecindad (± líneas) en la que se cuentan los términos distintos de la petición para elegir un foco. */
@@ -233,12 +242,36 @@ export interface ContextSelection {
   text: string;
 }
 
+const MAX_BRIDGE_HINTS = 12;
+
+export type FolderLayer = 'front' | 'back' | 'datos';
+
+/** Rol de una carpeta del workspace, detectado solo por nombres de archivo (sin leer contenido). */
+export interface FolderRole {
+  mount: string;
+  roles: FolderLayer[];
+  tech: string[];
+}
+
+/** Pareja detectada llamada del front → handler del back (rutas como en el mapa). */
+export interface BridgeHint {
+  front: string;
+  line: number;
+  method: string;
+  back: string;
+  handler: string | null;
+}
+
 export interface FlowContext {
   mounts: ContextMount[];
   mapText: string;
   fragments: ContextFragment[];
   active?: ContextActive;
   selection?: ContextSelection;
+  /** Rol de cada carpeta del workspace (solo por nombres de archivo). */
+  roles?: FolderRole[];
+  /** Parejas llamada del front → handler del back detectadas. */
+  bridge?: BridgeHint[];
 }
 
 export interface PinnedRef {
@@ -319,11 +352,11 @@ function termsOf(texts: string[]): string[] {
   return [...terms].slice(0, 40);
 }
 
-function allowed(file: ProjectFileInfo): boolean {
+export function allowed(file: ProjectFileInfo): boolean {
   return !file.binary && !isContextExcludedPath(file.path) && !isSensitiveCodeFile(file.name);
 }
 
-async function readText(file: ProjectFileInfo, maxBytes: number): Promise<string | null> {
+export async function readText(file: ProjectFileInfo, maxBytes: number): Promise<string | null> {
   try {
     const uri = vscode.Uri.parse(file.id, true);
     const open = vscode.workspace.textDocuments.some((doc) => doc.uri.toString() === uri.toString());
@@ -340,7 +373,7 @@ async function readText(file: ProjectFileInfo, maxBytes: number): Promise<string
   }
 }
 
-async function pool<T>(items: T[], size: number, run: (item: T) => Promise<void>, token: vscode.CancellationToken): Promise<void> {
+export async function pool<T>(items: T[], size: number, run: (item: T) => Promise<void>, token: vscode.CancellationToken): Promise<void> {
   let next = 0;
   const workers = Array.from({ length: Math.min(size, items.length) }, async () => {
     while (next < items.length && !token.isCancellationRequested) {
@@ -406,7 +439,7 @@ function isTestPath(path: string): boolean {
 }
 
 /** Round-robin entre carpetas conservando el orden dentro de cada una. */
-function interleaveByMount(paths: string[], multi: boolean): string[] {
+export function interleaveByMount(paths: string[], multi: boolean): string[] {
   if (!multi) return paths;
   const groups = new Map<string, string[]>();
   for (const path of paths) {
@@ -868,6 +901,426 @@ function activeOf(files: ProjectFileInfo[]): { active: ContextActive; selection?
   return { active, selection, file };
 }
 
+/* ------------------------------ puente HTTP front → back ------------------------------ */
+
+/** Endpoint declarado en el back: método HTTP, expresiones de ruta (prefijo de clase + método, sin resolver) y handler. */
+interface RouteDecl {
+  path: string;
+  httpMethod: string;
+  exprs: string[];
+  handler: string | null;
+  line: number;
+}
+
+/** Petición HTTP del front: método, segmentos de la ruta y si se perdió el prefijo (host o variable sin resolver). */
+interface HttpCall {
+  httpMethod: string;
+  segments: string[];
+  partial: boolean;
+  line: number;
+}
+
+/** Endpoint del back con la ruta ya resuelta. */
+interface BridgeRoute {
+  path: string;
+  httpMethod: string;
+  segments: string[];
+  handler: string | null;
+}
+
+const ROUTE_EXTENSIONS = ['java', 'kt', 'ts', 'js', 'py'];
+const MAX_ROUTE_DECLS = 2000;
+const MAX_ROUTE_LINES = 6000;
+/** Marcadores baratos: solo se analizan los archivos que declaran endpoints. */
+const ROUTE_MARKERS = /@(?:Get|Post|Put|Patch|Delete|Request)Mapping\b|@Controller\s*\(|\b(?:router|app|\w{1,40}Router)\s*\.\s*(?:get|post|put|patch|delete|all)\s*\(|@\w{1,40}\s*\.\s*(?:get|post|put|patch|delete|route)\s*\(/;
+const SPRING_CONTROLLER = /@(?:Rest)?Controller\b/;
+const SPRING_MAPPING = /@(Get|Post|Put|Patch|Delete|Request)Mapping\b/;
+const SPRING_HANDLER = /(?:public|protected|private|fun)\b[^=;(){]{0,200}?\b([A-Za-z_]\w*)\s*\(/;
+const NEST_CONTROLLER = /@Controller\s*\(\s*(?:(['"`])([^'"`\n]{0,200})\1)?/;
+const NEST_MAPPING = /@(Get|Post|Put|Patch|Delete|All)\s*\(\s*(?:(['"`])([^'"`\n]{0,200})\2)?/;
+const NEST_HANDLER = /^\s*(?:(?:public|private|protected|async|static)\s+)*([A-Za-z_$][\w$]{0,60})\s*\(/;
+const EXPRESS_ROUTE = /\b(?:router|app|\w{1,40}Router)\s*\.\s*(get|post|put|patch|delete|all)\s*\(\s*(['"`])([^'"`\n]{0,300})\2/;
+const PY_ROUTE = /@\w{1,40}\s*\.\s*(get|post|put|patch|delete|route)\s*\(\s*(['"])([^'"\n]{0,300})\2([^\n]{0,200})/;
+const PY_HANDLER = /^\s*(?:async\s+)?def\s+([A-Za-z_]\w{0,60})/;
+const JAVA_CONST = /\bstatic\s+final\s+String\s+([A-Za-z_]\w{0,80})\s*=\s*([^;\n]{1,300});/g;
+const JAVA_IFACE_CONST = /\bString\s+([A-Z][A-Z0-9_]{0,80})\s*=\s*([^;\n]{1,300});/g;
+const KOTLIN_CONST = /\bconst\s+val\s+([A-Za-z_]\w{0,80})\s*(?::\s*String)?\s*=\s*([^\n]{1,300})/g;
+const TS_CONST = /\bexport\s+const\s+([A-Za-z_$][\w$]{0,80})\s*(?::\s*string)?\s*=\s*([^;\n]{1,300})/g;
+const HTTP_CLIENT_MARKERS = /HttpClient|\bfetch\s*\(|axios|\bhttp\s*\.|\$http/;
+const HTTP_CALL_LITERAL = /\.\s*(get|post|put|patch|delete|request)\s*(?:<[^()]{0,200}>)?\s*\(\s*(['"`])((?:(?!\2)[\s\S]){1,300})\2/g;
+const HTTP_CALL_PLUS = /\.\s*(get|post|put|patch|delete|request)\s*(?:<[^()]{0,200}>)?\s*\(\s*((?:this\.)?[A-Za-z_$][\w$]{0,60})\s*\+\s*(['"`])((?:(?!\3)[\s\S]){1,300})\3/g;
+const HTTP_CALL_IDENT = /\.\s*(get|post|put|patch|delete|request)\s*(?:<[^()]{0,200}>)?\s*\(\s*(?:this\.)?([A-Za-z_$][\w$]{0,60})\s*[,)]/g;
+const FETCH_CALL = /\bfetch\s*\(\s*(['"`])((?:(?!\1)[\s\S]){1,300})\1/g;
+const FIELD_LITERAL = /^\s*(?:(?:export|private|public|protected|readonly|static|const|let|var)\s+)*([A-Za-z_$][\w$]{0,60})\s*(?::[^=;]{1,80})?=\s*(['"`])((?:(?!\2).){0,300})\2/;
+const FIELD_PLUS = /^\s*(?:(?:export|private|public|protected|readonly|static|const|let|var)\s+)*([A-Za-z_$][\w$]{0,60})\s*(?::[^=;]{1,80})?=\s*([A-Za-z_$][\w$.]{0,80})\s*\+\s*(['"`])((?:(?!\3).){0,300})\3/;
+const MAX_HTTP_MATCHES = 200;
+
+/** Método HTTP de un verbo (`get` → GET); `request`, `route` y `all` valen para cualquiera. */
+function verbOf(name: string): string {
+  const upper = name.toUpperCase();
+  return ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(upper) ? upper : 'ANY';
+}
+
+function isCommentLine(line: string): boolean {
+  const trimmed = line.trimStart();
+  return trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*') || trimmed.startsWith('#');
+}
+
+/** Anotación desde `from` en la línea `start` hasta cerrar el paréntesis (como mucho 6 líneas): texto, línea final y resto de esa línea. */
+function annotationAt(lines: string[], start: number, from: number): { text: string; end: number; rest: string } {
+  let text = '';
+  let depth = 0;
+  let opened = false;
+  for (let i = start; i < Math.min(lines.length, start + 6); i++) {
+    const part = (i === start ? lines[i].slice(from) : lines[i]).slice(0, 1000);
+    if (i === start) {
+      const afterName = /^@\w+\s*/.exec(part);
+      if (!afterName || part[afterName[0].length] !== '(') return { text: afterName ? afterName[0] : part, end: i, rest: afterName ? part.slice(afterName[0].length) : '' };
+    }
+    for (let c = 0; c < part.length; c++) {
+      const ch = part[c];
+      text += ch;
+      if (ch === '(') {
+        depth++;
+        opened = true;
+      } else if (ch === ')') {
+        depth--;
+        if (opened && depth <= 0) return { text, end: i, rest: part.slice(c + 1) };
+      }
+    }
+    text += '\n';
+  }
+  return { text, end: Math.min(lines.length - 1, start + 5), rest: '' };
+}
+
+/** Ruta (expresión sin resolver) y método HTTP de los argumentos de una anotación `@XMapping(...)`. */
+function mappingArgs(annotation: string): { expr: string; method: string | null } {
+  const open = annotation.indexOf('(');
+  const close = annotation.lastIndexOf(')');
+  if (open < 0 || close < open) return { expr: '', method: null };
+  const inner = annotation.slice(open + 1, close);
+  const method = /RequestMethod\s*\.\s*(GET|POST|PUT|PATCH|DELETE)\b/.exec(inner)?.[1] ?? null;
+  const named = /\b(?:value|path)\s*=\s*[{[]?\s*/.exec(inner);
+  if (named) return { expr: takeExpr(inner.slice(named.index + named[0].length)), method };
+  const first = inner.trimStart().replace(/^[{[]\s*/, '');
+  if (!first || /^[A-Za-z_]\w*\s*=(?!=)/.test(first)) return { expr: '', method };
+  return { expr: takeExpr(first), method };
+}
+
+const EXPR_ATOM = '(?:"[^"\\n]{0,300}"|\'[^\'\\n]{0,300}\'|[A-Za-z_$][\\w$.]{0,120})';
+const EXPR_START = new RegExp(`^\\s*${EXPR_ATOM}(?:\\s*\\+\\s*${EXPR_ATOM}){0,8}`);
+
+/** Primera expresión de ruta (literales y constantes unidos con `+`) al inicio del texto. */
+function takeExpr(text: string): string {
+  const m = EXPR_START.exec(text);
+  return m ? m[0].trim() : '';
+}
+
+/** Endpoints de un archivo del back (Spring, NestJS, Express, Flask/FastAPI). Solo regex acotadas sobre el contenido ya leído. */
+function extractRouteDecls(path: string, content: string, ext: string): RouteDecl[] {
+  if (!ROUTE_MARKERS.test(content)) return [];
+  const out: RouteDecl[] = [];
+  const lines = content.split(/\r?\n/, MAX_ROUTE_LINES);
+  const push = (decl: Omit<RouteDecl, 'path'>): void => {
+    if (out.length < 200) out.push({ path, ...decl });
+  };
+  if (ext === 'java' || ext === 'kt') {
+    if (!SPRING_CONTROLLER.test(content)) return out;
+    const classIdx = lines.findIndex((line) => !isCommentLine(line) && /\b(?:class|interface|object)\s+[A-Za-z_]\w*/.test(line));
+    if (classIdx < 0) return out;
+    let classExpr: string | null = null;
+    for (let i = 0; i <= classIdx && classExpr === null; i++) {
+      if (isCommentLine(lines[i])) continue;
+      const m = /@RequestMapping\b/.exec(lines[i]);
+      if (m) classExpr = mappingArgs(annotationAt(lines, i, m.index).text).expr;
+    }
+    for (let i = classIdx; i < lines.length; i++) {
+      if (isCommentLine(lines[i])) continue;
+      const m = SPRING_MAPPING.exec(lines[i]);
+      if (!m || (i === classIdx && m.index < (lines[i].search(/\b(?:class|interface|object)\s/) || 0))) continue;
+      const ann = annotationAt(lines, i, m.index);
+      const { expr, method } = mappingArgs(ann.text);
+      let handler: string | null = null;
+      for (let j = ann.end; j < Math.min(lines.length, ann.end + 9); j++) {
+        const candidate = j === ann.end ? ann.rest : lines[j];
+        if (j > ann.end && SPRING_MAPPING.test(candidate)) break;
+        const h = SPRING_HANDLER.exec(candidate);
+        if (h) {
+          handler = h[1];
+          break;
+        }
+      }
+      push({ httpMethod: m[1] === 'Request' ? method ?? 'ANY' : m[1].toUpperCase(), exprs: classExpr === null ? [expr] : [classExpr, expr], handler, line: i });
+    }
+    return out;
+  }
+  if (ext === 'ts' || ext === 'js') {
+    if (content.includes('@angular/')) return out;
+    const ctrl = NEST_CONTROLLER.exec(content);
+    if (ctrl) {
+      const prefix = JSON.stringify(ctrl[2] ?? '');
+      for (let i = 0; i < lines.length; i++) {
+        const m = NEST_MAPPING.exec(lines[i]);
+        if (!m || isCommentLine(lines[i])) continue;
+        let handler: string | null = null;
+        for (let j = i + 1; j < Math.min(lines.length, i + 7); j++) {
+          if (lines[j].trimStart().startsWith('@')) continue;
+          const h = NEST_HANDLER.exec(lines[j]);
+          if (h) handler = h[1];
+          break;
+        }
+        push({ httpMethod: verbOf(m[1]), exprs: [prefix, JSON.stringify(m[3] ?? '')], handler, line: i });
+      }
+      return out;
+    }
+    for (let i = 0; i < lines.length; i++) {
+      const m = EXPRESS_ROUTE.exec(lines[i]);
+      if (m && !isCommentLine(lines[i])) push({ httpMethod: verbOf(m[1]), exprs: [JSON.stringify(m[3])], handler: null, line: i });
+    }
+    return out;
+  }
+  if (ext === 'py') {
+    for (let i = 0; i < lines.length; i++) {
+      const m = PY_ROUTE.exec(lines[i]);
+      if (!m) continue;
+      let httpMethod = verbOf(m[1]);
+      if (m[1] === 'route') httpMethod = /methods\s*=\s*\[\s*['"](GET|POST|PUT|PATCH|DELETE)/i.exec(m[4])?.[1].toUpperCase() ?? 'ANY';
+      let handler: string | null = null;
+      for (let j = i + 1; j < Math.min(lines.length, i + 6); j++) {
+        const h = PY_HANDLER.exec(lines[j]);
+        if (h) {
+          handler = h[1];
+          break;
+        }
+      }
+      push({ httpMethod, exprs: [JSON.stringify(m[3])], handler, line: i });
+    }
+  }
+  return out;
+}
+
+/**
+ * Constantes de texto con ruta (`static final String LOGIN = "/login"`, `const val`, `export const`): `NAME` y
+ * `Archivo.NAME` → expresión sin resolver. Solo las que contienen `/` o concatenan.
+ */
+function extractStringConstants(content: string, ext: string, fileBase: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const patterns = ext === 'java' ? [JAVA_CONST, JAVA_IFACE_CONST] : ext === 'kt' ? [KOTLIN_CONST] : ext === 'ts' || ext === 'js' ? [TS_CONST] : [];
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    let found = 0;
+    for (let m = pattern.exec(content); m && found < 200; m = pattern.exec(content)) {
+      found++;
+      const expr = m[2].trim();
+      if (!/["'`]/.test(expr) || !(expr.includes('/') || expr.includes('+'))) continue;
+      out.set(`${fileBase}.${m[1]}`, expr);
+      if (!out.has(m[1])) out.set(m[1], expr);
+    }
+  }
+  return out;
+}
+
+/** Resuelve una expresión de ruta (literales y constantes unidos con `+`); `null` si alguna constante no se conoce. */
+function resolveRouteExpr(expr: string, constants: Map<string, string>, depth = 0): string | null {
+  const text = expr.trim();
+  if (!text) return '';
+  if (depth > 3) return null;
+  let out = '';
+  for (const rawPart of text.split('+')) {
+    const part = rawPart.trim().replace(/^\(+/, '').replace(/\)+$/, '').trim();
+    if (!part) return null;
+    const quote = part[0];
+    if ((quote === '"' || quote === "'" || quote === '`') && part.length >= 2 && part.endsWith(quote)) {
+      out += part.slice(1, -1);
+      continue;
+    }
+    if (!/^[A-Za-z_$][\w$.]{0,120}$/.test(part)) return null;
+    const ids = part.split('.');
+    const last = ids[ids.length - 1];
+    const found = constants.get(part) ?? constants.get(`${ids[0]}.${last}`) ?? constants.get(last);
+    if (found === undefined) return null;
+    const value = resolveRouteExpr(found, constants, depth + 1);
+    if (value === null) return null;
+    out += value;
+  }
+  return out;
+}
+
+/** Segmentos de una ruta en minúsculas; `{x}`, `:x`, `*` y `${…}` son comodines (`*`). */
+function routeSegments(path: string): string[] {
+  return path.split('/').map((s) => s.trim()).filter(Boolean)
+    .map((s) => (/[{}]/.test(s) || s.startsWith(':') || s === '*' || s.includes('${') ? '*' : s.toLowerCase()));
+}
+
+/** Expande `${campo}` / `${this.campo}` con los inicializadores del mismo archivo (hasta 2 niveles). */
+function expandFields(template: string, fields: Map<string, string>, depth = 0): string {
+  if (depth >= 2) return template;
+  return template.replace(/\$\{\s*(?:this\.)?([A-Za-z_$][\w$]{0,60})\s*\}/g, (all: string, name: string) => {
+    const value = fields.get(name);
+    return value === undefined ? all : expandFields(value, fields, depth + 1);
+  });
+}
+
+/** Peticiones HTTP de un archivo TS/JS (HttpClient, fetch, axios) con su ruta ya reducida a segmentos. Como mucho `MAX_HTTP_CALLS`. */
+function extractHttpCalls(content: string): HttpCall[] {
+  if (!HTTP_CLIENT_MARKERS.test(content)) return [];
+  const fields = new Map<string, string>();
+  const lines = content.split(/\r?\n/, MAX_ROUTE_LINES);
+  for (const line of lines) {
+    if (line.length > 600 || !line.includes('=')) continue;
+    const literal = FIELD_LITERAL.exec(line);
+    if (literal) {
+      if (!fields.has(literal[1])) fields.set(literal[1], literal[3]);
+      continue;
+    }
+    const plus = FIELD_PLUS.exec(line);
+    if (plus && !fields.has(plus[1])) fields.set(plus[1], `\${${plus[2]}}${plus[4]}`);
+  }
+  const lineAt = (index: number): number => {
+    let n = 0;
+    for (let i = content.indexOf('\n'); i >= 0 && i < index; i = content.indexOf('\n', i + 1)) n++;
+    return n;
+  };
+  const calls: HttpCall[] = [];
+  const seen = new Set<string>();
+  const add = (verb: string, template: string, index: number): void => {
+    if (calls.length >= MAX_HTTP_CALLS) return;
+    let value = expandFields(template, fields);
+    let partial = false;
+    const lead = /^(?:\$\{[^}]{0,120}\})+/.exec(value);
+    if (lead) {
+      value = value.slice(lead[0].length);
+      partial = true;
+    }
+    value = value.replace(/^https?:\/\/[^/]{1,200}/i, '');
+    const cut = value.search(/[?#]/);
+    if (cut >= 0) value = value.slice(0, cut);
+    if (!value.includes('/') || /^\.{1,2}\//.test(value)) return;
+    const segments = routeSegments(value);
+    if (!segments.length) return;
+    const httpMethod = verbOf(verb);
+    const key = `${httpMethod}|${segments.join('/')}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    calls.push({ httpMethod, segments, partial, line: lineAt(index) });
+  };
+  const scan = (regex: RegExp, handle: (m: RegExpExecArray) => void): void => {
+    regex.lastIndex = 0;
+    let n = 0;
+    for (let m = regex.exec(content); m && n < MAX_HTTP_MATCHES && calls.length < MAX_HTTP_CALLS; m = regex.exec(content)) {
+      n++;
+      handle(m);
+    }
+  };
+  scan(HTTP_CALL_LITERAL, (m) => add(m[1], m[3], m.index));
+  scan(HTTP_CALL_PLUS, (m) => add(m[1], `\${${m[2].replace(/^this\./, '')}}${m[4]}`, m.index));
+  scan(HTTP_CALL_IDENT, (m) => {
+    const value = fields.get(m[2]);
+    if (value !== undefined) add(m[1], value, m.index);
+  });
+  scan(FETCH_CALL, (m) => add('request', m[2], m.index));
+  return calls;
+}
+
+/** Puntuación de un endpoint del back para una petición del front: 0 = no encaja; 2–3 por la ruta, +1 si coincide el método. */
+function matchScore(front: HttpCall, back: BridgeRoute): number {
+  const f = front.segments;
+  const b = back.segments;
+  if (!f.length || !b.length) return 0;
+  const same = (x: string, y: string): boolean => x === y || x === '*' || y === '*';
+  const aligned = (long: string[], short: string[]): boolean => short.every((s, i) => same(long[long.length - short.length + i], s));
+  let base = 0;
+  let literal = false;
+  if (f.length === b.length && aligned(f, b)) {
+    base = 3;
+    literal = f.some((s, i) => s !== '*' && s === b[i]);
+  } else if (front.partial && b.length > f.length && aligned(b, f)) {
+    base = 2;
+    literal = f.some((s, i) => s !== '*' && s === b[b.length - f.length + i]);
+  } else if (f.length > b.length && aligned(f, b)) {
+    // El front incluye el contexto del servidor (`/Nexo/api/x`) que el controlador no declara.
+    base = 2;
+    literal = b.some((s, i) => s !== '*' && s === f[f.length - b.length + i]);
+  }
+  if (!base || !literal) return 0;
+  return base + (front.httpMethod === back.httpMethod ? 1 : 0);
+}
+
+/* ------------------------------- roles de carpeta ------------------------------- */
+
+/** Capa a la que pertenece una ruta (relativa a su carpeta) por nombre y extensión; `null` si no encaja. */
+export function layerOfPath(path: string): FolderLayer | null {
+  const name = baseName(path);
+  const ext = codeExtension(name);
+  if (ext === 'sql' || ext === 'prisma') return 'datos';
+  if (/(Repository|Repo|Dao|Entity)\.(java|kt|ts|js|py|cs)$/.test(name)) return 'datos';
+  if (/(^|\/)(repository|repositories|dao|entity|entities|migrations?|changelog)\//i.test(path)) return 'datos';
+  if (['java', 'kt', 'scala', 'py', 'cs', 'go', 'rb', 'php'].includes(ext) || /\.controller\.(ts|js)$/i.test(name)) return 'back';
+  if (['html', 'tsx', 'jsx', 'vue', 'svelte', 'css', 'scss'].includes(ext) || /\.(component|service|guard|interceptor|pipe|store)\.ts$/i.test(name)) return 'front';
+  return null;
+}
+
+/** Roles (front, back, datos) y tecnologías de cada carpeta, en una sola pasada por los nombres de archivo. */
+export function detectFolderRoles(files: ProjectFileInfo[], mountIds: string[], prefixed: boolean): FolderRole[] {
+  interface Acc { roles: Set<FolderLayer>; tech: Set<string>; build: boolean; jvm: boolean }
+  const acc = new Map<string, Acc>();
+  for (const id of mountIds) acc.set(id, { roles: new Set(), tech: new Set(), build: false, jvm: false });
+  for (const file of files) {
+    const mount = prefixed ? mountOf(file.path, true) : mountIds[0];
+    const a = acc.get(mount);
+    if (!a) continue;
+    const rel = relPath(file.path, prefixed);
+    const name = file.name;
+    const ext = codeExtension(name);
+    if (layerOfPath(rel) === 'datos') a.roles.add('datos');
+    if (name === 'angular.json' || /\.component\.ts$/i.test(name)) {
+      a.roles.add('front');
+      a.tech.add('Angular');
+    } else if (/^(vite|next|nuxt|svelte|astro)\.config\./i.test(name)) {
+      a.roles.add('front');
+      if (/^svelte/i.test(name)) a.tech.add('Svelte');
+    } else if (ext === 'tsx' || ext === 'jsx') {
+      a.roles.add('front');
+      a.tech.add('React');
+    } else if (ext === 'vue') {
+      a.roles.add('front');
+      a.tech.add('Vue');
+    } else if (ext === 'svelte') {
+      a.roles.add('front');
+      a.tech.add('Svelte');
+    }
+    if (name === 'pom.xml' || /^build\.gradle(\.kts)?$/.test(name)) {
+      a.roles.add('back');
+      a.build = true;
+    } else if (name === 'manage.py') {
+      a.roles.add('back');
+      a.tech.add('Django');
+    } else if (name === 'go.mod') {
+      a.roles.add('back');
+      a.tech.add('Go');
+    } else if (ext === 'csproj') {
+      a.roles.add('back');
+      a.tech.add('.NET');
+    } else if (/Controller\.(java|kt|cs)$/.test(name)) {
+      a.roles.add('back');
+      if (ext === 'cs') a.tech.add('.NET');
+      else a.jvm = true;
+    } else if (/\.controller\.ts$/i.test(name)) {
+      a.roles.add('back');
+      a.tech.add('NestJS');
+    }
+    if (ext === 'java' || ext === 'kt') a.jvm = true;
+  }
+  const out: FolderRole[] = [];
+  for (const [mount, a] of acc) {
+    if (a.build && a.jvm) a.tech.add('Spring Boot');
+    if (!a.roles.size) continue;
+    const order: FolderLayer[] = ['front', 'back', 'datos'];
+    out.push({ mount, roles: order.filter((r) => a.roles.has(r)), tech: [...a.tech] });
+  }
+  return out;
+}
+
 /* --------------------------------- principal --------------------------------- */
 
 /** Contexto del proyecto para FLOW/PROPOSE. Lanza `Error('cancelled')` si se cancela. */
@@ -880,6 +1333,7 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
   if (!snapshot.mounts.length) throw new Error('No hay carpetas abiertas en el workspace.');
   const listed = snapshot.files.length;
   let candidates = snapshot.files.filter(allowed);
+  const roles = detectFolderRoles(candidates, snapshot.mounts.map((m) => m.id), snapshot.mounts.length > 1);
   const excluded = listed - candidates.length;
   let mountInfos = snapshot.mounts;
   const only = options.folder && snapshot.mounts.length > 1 ? snapshot.mounts.find((m) => m.id === options.folder) : undefined;
@@ -953,11 +1407,24 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
     scanSet.add(file.path);
     toScan.push(file);
   }
+  /** Endpoints del back y constantes de ruta vistos durante el escaneo (puente HTTP front → back). */
+  const routeDecls: RouteDecl[] = [];
+  const constants = new Map<string, string>();
+  const collectBridge = (file: ProjectFileInfo, content: string): void => {
+    const ext = codeExtension(file.name);
+    if (!ROUTE_EXTENSIONS.includes(ext) || isTestPath(file.path)) return;
+    for (const [key, value] of extractStringConstants(content, ext, file.name.replace(/\.[^.]+$/, ''))) {
+      if (!constants.has(key)) constants.set(key, value);
+    }
+    if (routeDecls.length >= MAX_ROUTE_DECLS) return;
+    routeDecls.push(...extractRouteDecls(file.path, content, ext).slice(0, MAX_ROUTE_DECLS - routeDecls.length));
+  };
   if (terms.length) {
     report('Buscando en el código…');
     await pool(toScan, SCAN_CONCURRENCY, async (file) => {
       const content = await readText(file, MAX_SCAN_BYTES);
       if (content === null) return;
+      collectBridge(file, content);
       const folded = foldAccents(content).toLowerCase();
       let score = 0;
       for (const term of terms) score += Math.log2(1 + countHits(folded, term));
@@ -1034,14 +1501,18 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
       if (!best.has(key)) best.set(key, score);
     }
     const globalBest = ranked.length ? ranked[0].score : 0;
+    // FLOW recorre varias capas (front → back → datos): umbral más permisivo y más archivos por carpeta.
+    const crossLayer = !prioritize;
+    const relevance = crossLayer ? FLOW_MOUNT_RELEVANCE : 0.5;
+    const topPerMount = crossLayer ? KEYWORD_TOP_PER_MOUNT_FLOW : KEYWORD_TOP_PER_MOUNT;
     for (const mount of mountInfos) {
       const relevant = mentioned.size > 0
         ? mentioned.has(mount.id)
-        : globalBest > 0 && (best.get(mount.id) ?? 0) >= globalBest * 0.5;
+        : globalBest > 0 && (best.get(mount.id) ?? 0) >= globalBest * relevance;
       if (!relevant) continue;
       let taken = 0;
       for (const { file, score } of ranked) {
-        if (taken >= KEYWORD_TOP_PER_MOUNT || score <= 0) break;
+        if (taken >= topPerMount || score <= 0) break;
         if (mountOf(file.path, true) !== mount.id) continue;
         pushPath(file.path);
         taken++;
@@ -1099,6 +1570,88 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
     return content;
   };
 
+  // Puente HTTP: cada petición del front seleccionado se empareja con el endpoint del back (método + ruta, resolviendo
+  // constantes); el controlador entra detrás de su origen y su handler se ancla para seguir Controller → Service → Repository.
+  let bridged = 0;
+  const bridgeAnchors: { path: string; handler: string | null }[] = [];
+  const bridgeHints: BridgeHint[] = [];
+  if (terms.length && routeDecls.length) {
+    const routes: BridgeRoute[] = [];
+    for (const decl of routeDecls) {
+      let joined = '';
+      let resolved = true;
+      for (const expr of decl.exprs) {
+        const part = resolveRouteExpr(expr, constants);
+        if (part === null) {
+          resolved = false;
+          break;
+        }
+        joined += `/${part}`;
+      }
+      const segments = resolved ? routeSegments(joined) : [];
+      if (segments.length) routes.push({ path: decl.path, httpMethod: decl.httpMethod, segments, handler: decl.handler });
+    }
+    const sources = finalPaths
+      .filter((path) => /\.(?:ts|tsx|js|jsx)$/i.test(path) && !isTestPath(path))
+      .slice(0, MAX_BRIDGE_SOURCES);
+    const found: { source: string; call: HttpCall; relevance: number }[] = [];
+    if (routes.length) {
+      for (const source of sources) {
+        cancelled(token);
+        const file = byPath.get(source);
+        if (!file) continue;
+        const content = await contentOf(file);
+        if (content === null) continue;
+        const calls = extractHttpCalls(content);
+        if (!calls.length) continue;
+        const lines = content.split(/\r?\n/);
+        for (const call of calls) {
+          const around = foldAccents(lines.slice(Math.max(0, call.line - 3), call.line + 4).join('\n')).toLowerCase();
+          found.push({ source, call, relevance: terms.reduce((n, term) => n + (around.includes(term) ? 1 : 0), 0) });
+        }
+      }
+    }
+    const relevantCalls = found.filter((f) => f.relevance > 0);
+    const picked = (relevantCalls.length ? relevantCalls : found).sort((a, b) => b.relevance - a.relevance).slice(0, MAX_HTTP_CALLS);
+    const targets = new Map<string, { source: string; handlers: Set<string> }>();
+    for (const item of picked) {
+      let bestRoute: BridgeRoute | null = null;
+      let bestScore = 0;
+      for (const route of routes) {
+        if (route.path === item.source) continue;
+        const score = matchScore(item.call, route);
+        if (score > bestScore) {
+          bestScore = score;
+          bestRoute = route;
+        }
+      }
+      if (!bestRoute) continue;
+      if (bridgeHints.length < MAX_BRIDGE_HINTS) {
+        bridgeHints.push({ front: item.source, line: item.call.line, method: item.call.httpMethod, back: bestRoute.path, handler: bestRoute.handler });
+      }
+      let target = targets.get(bestRoute.path);
+      if (!target) {
+        if (targets.size >= MAX_BRIDGE_FILES) continue;
+        target = { source: item.source, handlers: new Set() };
+        targets.set(bestRoute.path, target);
+      }
+      if (bestRoute.handler && target.handlers.size < 4) target.handlers.add(bestRoute.handler);
+    }
+    const present = new Set(finalPaths);
+    const lastAfter = new Map<string, string>();
+    for (const [backPath, target] of targets) {
+      if (!present.has(backPath)) {
+        if (finalPaths.length >= MAX_FILES) continue;
+        const anchor = lastAfter.get(target.source) ?? target.source;
+        finalPaths.splice(finalPaths.indexOf(anchor) + 1, 0, backPath);
+        present.add(backPath);
+        lastAfter.set(target.source, backPath);
+      }
+      for (const handler of target.handlers) bridgeAnchors.push({ path: backPath, handler });
+      bridged++;
+    }
+  }
+
   // Expansión por referencias (Controller → ServiceImpl → Repository → entidad), solo en la misma carpeta.
   const index = new Map<string, Map<string, ProjectFileInfo[]>>();
   for (const file of candidates) {
@@ -1115,7 +1668,10 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
     else byKey.set(key, [file]);
   }
   const included = new Set(finalPaths);
-  const queue = finalPaths.map((path) => ({ path, depth: 0 }));
+  // Se recorre intercalando carpetas y con cuota por carpeta: los servicios del front no agotan las referencias del back.
+  const queue = interleaveByMount(finalPaths, multi).map((path) => ({ path, depth: 0 }));
+  const refsByMount = new Map<string, number>();
+  const refCap = multi ? MAX_REF_FILES_PER_MOUNT : MAX_REF_FILES;
   let refsAdded = 0;
   for (let q = 0; q < queue.length; q++) {
     cancelled(token);
@@ -1131,10 +1687,11 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
     if (content === null) continue;
     const parts = referencedParts(content, ext);
     const keys = [...(withTypes ? parts.types : []), ...(parts.entity ? [parts.entity] : [])];
-    const byKey = index.get(mountOf(path, prefixed));
+    const mountKey = mountOf(path, prefixed);
+    const byKey = index.get(mountKey);
     let offset = 0;
     for (const key of keys) {
-      if (refsAdded >= MAX_REF_FILES || finalPaths.length >= MAX_FILES) break;
+      if (refsAdded >= MAX_REF_FILES || finalPaths.length >= MAX_FILES || (refsByMount.get(mountKey) ?? 0) >= refCap) break;
       const list = byKey?.get(key);
       if (!list || list.some((f) => included.has(f.path))) continue;
       const target = list[0];
@@ -1143,6 +1700,7 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
       queue.push({ path: target.path, depth: depth + 1 });
       offset++;
       refsAdded++;
+      refsByMount.set(mountKey, (refsByMount.get(mountKey) ?? 0) + 1);
     }
   }
 
@@ -1217,6 +1775,10 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
     return scan.located.get(method) ?? null;
   };
   if (scans.length) {
+    for (const anchor of bridgeAnchors) {
+      const scan = scanByPath.get(anchor.path);
+      if (scan && anchor.handler) setCalled(`${scan.mount}|${scan.key}`, anchor.handler, 2);
+    }
     const termSet = new Set(terms);
     for (const scan of scans) {
       cancelled(token);
@@ -1264,6 +1826,12 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
       anchorDemand: list.reduce((n, f) => n + (f.priority >= 3 ? f.content.length : 0), 0),
     });
   }
+  // Carpetas intercaladas: ninguna se queda sin fragmentos por el tope global (cada archivo tiene su cuota de fragmentos).
+  if (multi) {
+    const rank = new Map(interleaveByMount(entries.map((e) => e.path), true).map((p, i) => [p, i] as const));
+    entries.sort((a, b) => (rank.get(a.path) ?? 0) - (rank.get(b.path) ?? 0));
+  }
+  const countShares = fairShares(entries.map((e) => e.fragments.length), MAX_FRAGMENTS);
   const anchorShares = fairShares(entries.map((e) => Math.min(e.anchorDemand, MAX_FILE_CHARS)), ANCHOR_BUDGET, MAX_FILE_CHARS);
   const anchorTotal = anchorShares.reduce((n, v) => n + v, 0);
   const restShares = fairShares(
@@ -1279,13 +1847,9 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
   for (let i = 0; i < entries.length; i++) {
     let left = anchorShares[i] + restShares[i];
     const kept: PlannedFragment[] = [];
-    let full = false;
     const ordered = [...entries[i].fragments].sort((a, b) => b.priority - a.priority || a.startLine - b.startLine);
     for (const fragment of ordered) {
-      if (fragments.length + kept.length >= MAX_FRAGMENTS) {
-        full = true;
-        break;
-      }
+      if (kept.length >= countShares[i]) break;
       if (fragment.content.length <= left) {
         kept.push(fragment);
         left -= fragment.content.length;
@@ -1315,13 +1879,12 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
       if (fragment.anchor) anchorCount++;
       if (fragment.focus) focusCount++;
     }
-    if (full) break;
   }
 
   options.log?.info(
     `Contexto · carpetas=${mountInfos.length} · listados=${listed} · excluidos=${excluded} · candidatos ${perMount(countBy(candidates.map((f) => f.path)))}`
     + ` · escaneados ${perMount(countBy(toScan.map((f) => f.path)))} · forzados=${forced.length} · IA=${aiPicked} · claves=${ids.length}`
-    + ` · referencias=${refsAdded} · anclas=${anchorCount} · archivos ${perMount(countBy(new Set(fragmentFiles)))} · fragmentos=${fragments.length} (${total} caracteres)`
+    + ` · referencias=${refsAdded} · puente=${bridged} · anclas=${anchorCount} · archivos ${perMount(countBy(new Set(fragmentFiles)))} · fragmentos=${fragments.length} (${total} caracteres)`
     + (prioritize ? ` · foco=${focusCount} · hermanos=${siblings.length}` : ''),
   );
   return {
@@ -1330,5 +1893,7 @@ export async function collectFlowContext(options: CollectOptions): Promise<FlowC
     fragments,
     ...(activeInfo ? { active: activeInfo.active } : {}),
     ...(activeInfo?.selection ? { selection: activeInfo.selection } : {}),
+    ...(roles.length ? { roles } : {}),
+    ...(bridgeHints.length ? { bridge: bridgeHints } : {}),
   };
 }

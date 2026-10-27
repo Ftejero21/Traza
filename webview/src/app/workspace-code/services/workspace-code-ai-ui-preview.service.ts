@@ -530,6 +530,10 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   viewportBusy = false;
   readonly viewports = UI_VIEWPORTS;
 
+  /** Se está buscando el componente del paso (`resolveTarget` en curso). */
+  private resolving = false;
+  /** «Visualizar pantalla» pulsado mientras se buscaba el componente: abrir al terminar. */
+  private openWhenReady = false;
   private loadRun = 0;
   private resolveRun = 0;
   private viewportRun = 0;
@@ -595,13 +599,27 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     this.tab = ctx.initialTab === 'after' && ctx.proposal ? 'after' : 'now';
     this.changed$.next();
     const run = ++this.resolveRun;
+    this.resolving = true;
     void this.resolveTarget(ctx, run);
   }
 
   /** «Visualizar pantalla»: abre el popup y, si no está listo ni cargando, reúne el contexto y pide el plan. */
   show(tab?: UiPreviewTab): void {
     const ctx = this.ctx;
-    if (!ctx || !this.target) return;
+    if (!ctx) return;
+    if (!this.target) {
+      this.open = true;
+      if (this.resolving) {
+        // Aún se busca el componente: se abre al terminar (la carga o el error los decide `resolveTarget`).
+        this.openWhenReady = true;
+      } else {
+        this.status = 'error';
+        this.errorText = this.i18n.t('aiFlow.screen.noComponent');
+      }
+      this.changed$.next();
+      this.reveal$.next();
+      return;
+    }
     this.open = true;
     if (tab === 'now' || (tab === 'after' && ctx.proposal)) this.tab = tab;
     this.changed$.next();
@@ -613,6 +631,18 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   retry(): void {
     if (this.status === 'loading') return;
     this.status = 'idle';
+    const ctx = this.ctx;
+    if (ctx && !this.target) {
+      // Sin componente: se vuelve a buscar y se abre al terminar.
+      this.errorText = null;
+      this.open = true;
+      this.openWhenReady = true;
+      this.resolving = true;
+      this.changed$.next();
+      const run = ++this.resolveRun;
+      void this.resolveTarget(ctx, run);
+      return;
+    }
     this.show();
   }
 
@@ -710,6 +740,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     this.resolveRun++;
     this.clearViewState();
     this.ctx = null;
+    this.resolving = false;
+    this.openWhenReady = false;
     this.status = 'idle';
     this.open = false;
     this.zoom = false;
@@ -734,6 +766,27 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   /* ---------------------------- componente del paso ancla ---------------------------- */
 
   private async resolveTarget(ctx: UiScreenContext, run: number): Promise<void> {
+    try {
+      await this.findTarget(ctx, run);
+    } finally {
+      if (run === this.resolveRun) {
+        this.resolving = false;
+        const wanted = this.openWhenReady;
+        this.openWhenReady = false;
+        if (wanted && this.ctx === ctx) {
+          if (this.target) {
+            if (this.status !== 'ready' && this.status !== 'loading') void this.load();
+          } else {
+            this.status = 'error';
+            this.errorText = this.i18n.t('aiFlow.screen.noComponent');
+            this.changed$.next();
+          }
+        }
+      }
+    }
+  }
+
+  private async findTarget(ctx: UiScreenContext, run: number): Promise<void> {
     const flow = this.flowService.flow;
     if (!flow) return;
     try {

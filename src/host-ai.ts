@@ -1,23 +1,23 @@
 /**
  * IA en el host con el modelo de lenguaje que el usuario ya tiene en VS Code (`vscode.lm`: Copilot, Claude, GPT,
- * BYOK…). Sustituye al backend de Traza: arma los prompts portados de tejechat, valida la salida (esquema + semántica,
- * con un reintento conversacional) y devuelve las mismas formas que esperan los sanitizadores de la webview.
+ * BYOK…). Sustituye al backend de Traza: arma los prompts portados de tejechat, comprueba solo el FORMATO de la salida
+ * (recorte mecánico + esquema; hasta 3 intentos conversacionales) y devuelve las mismas formas que esperan los
+ * sanitizadores de la webview. Nunca juzga ni corrige el contenido de la respuesta del modelo.
  * Nunca registra código, prompts, respuestas ni preguntas: solo códigos, tamaños y tiempos.
  */
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import type { ChangeCompareBody, FlowDiagnosisResponse, FlowKind, FlowRequestBody, NexoLanguage } from '../webview/src/app/bridge/protocol';
 import { maskConfigSecrets, maskSensitiveJson, maskSensitiveText } from '../webview/src/app/workspace-code/ai/workspace-code-ai-mask';
-import { applyFileChange } from '../webview/src/app/workspace-code/ai/workspace-code-ai-change-patch';
-import type { FileChange } from '../webview/src/app/workspace-code/ai/nexo-ia.changes.types';
 import { afterWindows, PatchError, type ChangeFile, type CodeWindow } from './ai/change-patcher';
 import { systemFor, type PromptOp } from './ai/prompts';
-import { validate } from './ai/schema-validator';
+import { clampToSchema, compactSchema, validate } from './ai/schema-validator';
 import {
   changeDiff, cut, cutCss, dbMapErrors, dropInvalidScenario, flowSemantics, isObj, numbered, parseModelJson, proposeSemantics,
-  repairDbMap, semantics, txt, uiPlanErrors,
+  repairDbMap, repairDiagnosis, repairUiPlan, txt, uiPlanErrors,
 } from './ai/semantics';
-import { collectFlowContext, type ContextFragment, type FlowContext, type PinnedRef } from './host-context';
+import { AGENT_TOOLS, AgentToolSession } from './host-agent-tools';
+import { collectFlowContext, type ContextFragment, type FlowContext, type FolderRole, type PinnedRef } from './host-context';
 import { readMountFile } from './host-files';
 
 type Obj = Record<string, unknown>;
@@ -60,6 +60,21 @@ const CHARS_PER_TOKEN = 3;
 const CACHE_MAX = 50;
 const CACHE_TTL_MS = 15 * 60_000;
 const COMPARE_CONCURRENCY = 3;
+const AGENT_MAX_ROUNDS = 14;
+const AGENT_MAX_CALLS = 40;
+const AGENT_MAX_CALLS_PER_ROUND = 8;
+const AGENT_TIME_MS = 150_000;
+const AGENT_SEED_CHARS = 45_000;
+const AGENT_TOOL_RESULT_CHARS = 16_000;
+const AGENT_RESERVE_CHARS = 12_000;
+const AGENT_MIN_RESULT_CHARS = 1500;
+/** Intentos máximos por formato no legible (1 inicial + 2 correcciones), en `runJson` y en el agente. */
+const MAX_FORMAT_ATTEMPTS = 3;
+const AGENT_MAX_FIXES = MAX_FORMAT_ATTEMPTS - 1;
+const AGENT_MAX_HINT_FILES = 12;
+const AGENT_EMPTY_NOTE = 'Tu respuesta llegó vacía: usa traza_search/traza_read/traza_list o responde con el JSON final.';
+const AGENT_CONTINUE_NOTE = 'Resultados de las herramientas arriba: sigue investigando con traza_search/traza_read/traza_list o responde con el JSON final.';
+const AGENT_BUDGET_NOTE ='Presupuesto de investigación agotado: responde ya solo con el JSON final usando el código leído.';
 
 const MAX_STEPS = 20;
 const MAX_RECENT_FLOWS = 10;
@@ -99,6 +114,10 @@ const MAX_DB_EXPLAIN_CONTEXT = 60_000;
 const MAX_DB_EXPLAIN_STEPS = 8;
 const MAX_FILE_READ_BYTES = 3 * 1024 * 1024;
 const TRUNC = '\n…[truncado]';
+/** Listas estructurales del FLOW: no se recortan (se perderían carriles o pasos); si se pasan del límite, se vuelve a preguntar. */
+const FLOW_KEEP_ARRAYS: ReadonlySet<string> = new Set(['$.lanes', '$.steps']);
+const PROPOSE_KEEP_ARRAYS: ReadonlySet<string> = new Set(['$.files']);
+const UNAPPLIED_NOTE = '## NOTA\nEl CODIGO de esta petición es el ORIGINAL (el cambio no se pudo aplicar a las ventanas): razona el después aplicando tú el CAMBIO PROPUESTO.\n\n';
 const JSON_TAIL = '\n\nResponde con un único objeto json.';
 const CHANGE_STATUSES = new Set(['modified', 'added', 'deleted']);
 const CHANGE_KINDS = new Set(['context', 'add', 'del']);
@@ -118,14 +137,13 @@ const MESSAGES = {
     tooLarge: 'La respuesta del modelo es demasiado grande.',
     invalid: 'El contexto de la petición no es válido.',
     uiTooLarge: 'El contexto de la pantalla es demasiado grande.',
-    noFit: 'El cambio no encaja con el código actual.',
     question: `La pregunta es obligatoria y no puede superar ${MAX_QUESTION_CHARS} caracteres.`,
     noFolders: 'Abre una carpeta del proyecto para generar el flujo.',
     dbTooLong: 'El contexto de la tabla es demasiado largo para generar la explicación.',
     dbInvalid: 'El contexto de la tabla no es válido.',
     dbBadOutput: 'La IA no devolvió pasos válidos.',
-    justification: 'Traza envía el código relevante del proyecto (sin archivos sensibles y con secretos enmascarados) a este modelo para generar y simular el flujo.',
-    notice: 'Traza usa el modelo de lenguaje que elijas en VS Code: el código relevante del proyecto (sin archivos sensibles y con secretos enmascarados) se envía al proveedor de ese modelo.',
+    justification: 'Traza deja que este modelo busque y lea, en solo lectura, el código del proyecto (sin archivos sensibles y con secretos enmascarados) para generar y simular el flujo.',
+    notice: 'Traza usa el modelo de lenguaje que elijas en VS Code: el código que el modelo busca y lee del proyecto, en solo lectura (sin archivos sensibles y con secretos enmascarados), se envía al proveedor de ese modelo.',
     pickTitle: 'Traza: Elegir modelo',
     pickPlaceholder: 'Modelo de VS Code que usará Traza',
     auto: 'Automático',
@@ -143,14 +161,13 @@ const MESSAGES = {
     tooLarge: 'The model response is too large.',
     invalid: 'The request context is not valid.',
     uiTooLarge: 'The screen context is too large.',
-    noFit: 'The change does not fit the current code.',
     question: `The question is required and cannot exceed ${MAX_QUESTION_CHARS} characters.`,
     noFolders: 'Open a project folder to generate the flow.',
     dbTooLong: 'The table context is too long to generate the explanation.',
     dbInvalid: 'The table context is not valid.',
     dbBadOutput: 'The AI did not return valid steps.',
-    justification: 'Traza sends the relevant project code (without sensitive files and with masked secrets) to this model to generate and simulate the flow.',
-    notice: 'Traza uses the language model you choose in VS Code: the relevant project code (without sensitive files and with masked secrets) is sent to that model\'s provider.',
+    justification: 'Traza lets this model search and read, read-only, the project code (without sensitive files and with masked secrets) to generate and simulate the flow.',
+    notice: 'Traza uses the language model you choose in VS Code: the project code the model searches and reads, read-only (without sensitive files and with masked secrets), is sent to that model\'s provider.',
     pickTitle: 'Traza: Elegir modelo',
     pickPlaceholder: 'VS Code model that Traza will use',
     auto: 'Automatic',
@@ -163,6 +180,26 @@ type MessageKey = keyof typeof MESSAGES.es;
 interface Validation {
   errors: string[];
   value?: unknown;
+}
+
+/** Definición del esquema que se enseña al modelo cuando su respuesta no se puede dibujar (sin definición: solo errores). */
+const FORMAT_DEFINITION: Partial<Record<PromptOp, string>> = {
+  FLOW: 'FlowDiagram',
+  SIMULATE: 'SimulationResult',
+  SIMULATE_BEFORE: 'SimulationResult',
+  SIMULATE_AFTER: 'SimulationResult',
+  LOGS: 'LogAnalysisResult',
+  PROPOSE: 'ChangeProposal',
+  UI_PLAN: 'UiPreviewPlan',
+  DB_MAP: 'FlowDbMap',
+};
+
+/** Mensaje de reintento por FORMATO: intento, rutas JSON con problema, formato esperado y petición de corregir solo eso. */
+function formatFeedback(definition: string | null, errors: string[], attempt: number, max: number): string {
+  let sb = `## FORMATO NO LEGIBLE (intento ${attempt} de ${max})\nTraza no ha podido dibujar tu respuesta anterior. Partes que no se pudieron leer (ruta JSON: problema):\n`;
+  sb += errors.slice(0, 20).map((e) => `- ${e}`).join('\n');
+  if (definition) sb += `\nFormato esperado (definicion ${definition}):\n${compactSchema(definition)}`;
+  return `${sb}\nDevuelve de nuevo el JSON completo con el mismo contenido, corrigiendo solo estas partes. Solo JSON.`;
 }
 
 interface RunOptions {
@@ -261,6 +298,16 @@ function linked(token: vscode.CancellationToken | undefined, cts: vscode.Cancell
   if (!token) return { dispose: () => undefined };
   if (token.isCancellationRequested) cts.cancel();
   return token.onCancellationRequested(() => cts.cancel());
+}
+
+/** Mensaje de error apto para el log: sin secretos, sin rutas absolutas, en una línea y de 200 caracteres como máximo. */
+function logSafe(message: string): string {
+  const text = maskSensitiveText(message)
+    .replace(/[A-Za-z]:[\\/][^\s'"`)<>]*/g, '<ruta>')
+    .replace(/(^|[^\w:/<])\/[\w.@-]+(?:\/[\w.@-]*)+/g, '$1<ruta>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cut(text, 200);
 }
 
 function isCancelled(error: unknown): boolean {
@@ -397,14 +444,44 @@ interface FlowTextInput {
   activeFlow?: string;
   lang: NexoLanguage;
   scenarioHint?: boolean;
+  /** Modo agente: visión general de todas las carpetas (va primero). */
+  overview?: string;
+  /** Modo agente: carpeta mencionada por el usuario (solo pista de por dónde empezar). */
+  focusFolder?: string;
+  /** Modo agente: rutas ya localizadas y fijadas (no limitan la búsqueda). */
+  hintFiles?: string[];
+}
+
+const FRONT_TECH = new Set(['Angular', 'React', 'Vue', 'Svelte']);
+
+function roleLine(role: FolderRole): string {
+  const parts = role.roles.map((layer) => {
+    if (layer === 'datos') return 'datos';
+    const tech = role.tech.filter((t) => FRONT_TECH.has(t) === (layer === 'front'));
+    return tech.length ? `${layer} (${tech.join(', ')})` : layer;
+  });
+  return `- ${cut(role.mount, 200)}: ${parts.join(', ')}`;
 }
 
 function composeFlowText(input: FlowTextInput, map: string, fragments: ContextFragment[], activeContent: string | null): string {
-  let sb = `## MAPA DEL PROYECTO\n${map || '(vacio)'}\n\n## MONTAJES\n`;
+  let sb = input.overview ? `## CARPETAS DEL WORKSPACE\n${input.overview}\n\n` : '';
+  sb += `## MAPA DEL PROYECTO\n${map || '(vacio)'}\n\n## MONTAJES\n`;
   const mounts = input.context.mounts.slice(0, MAX_MOUNTS);
   for (const m of mounts) sb += `- id=${cut(m.id.trim(), 200)} prefijo=${cut(m.prefix, MAX_PATH)} nombre=${cut(m.name.trim(), 200)}\n`;
   if (!mounts.length) sb += '(ninguno)\n';
   sb += '\n';
+  const roles = input.context.roles ?? [];
+  if (roles.length) {
+    sb += `## ROLES DE LAS CARPETAS\n${roles.slice(0, MAX_MOUNTS).map(roleLine).join('\n')}\nEl flujo debe recorrer todas estas capas cuando la petición trate un comportamiento de la aplicación.\n\n`;
+  }
+  const bridge = input.context.bridge ?? [];
+  if (bridge.length) {
+    sb += '## PUENTE HTTP DETECTADO\n';
+    for (const b of bridge.slice(0, 8)) sb += `- ${cut(b.front, MAX_PATH)}:L${b.line} ${b.method} → ${cut(b.back, MAX_PATH)}${b.handler ? ` (${cut(b.handler, 120)})` : ''}\n`;
+    sb += '\n';
+  }
+  if (input.focusFolder?.trim()) sb += `## CARPETA MENCIONADA\n${cut(input.focusFolder.trim(), 200)} (empieza aquí, pero investiga también las demás carpetas relacionadas)\n\n`;
+  if (input.hintFiles?.length) sb += `## ARCHIVOS INDICADOS\n${input.hintFiles.slice(0, AGENT_MAX_HINT_FILES).map((f) => `- ${cut(f, MAX_PATH)}`).join('\n')}\n\n`;
   if (input.mode === 'PROPOSE' && input.activeFlow) sb += `## FLUJO ACTIVO\n${cut(input.activeFlow, MAX_ACTIVE_FLOW_CHARS)}\n\n`;
   if (fragments.length) {
     sb += '## FRAGMENTOS RELEVANTES\n';
@@ -429,6 +506,8 @@ function fitFlowText(input: FlowTextInput): UserBuilder {
     const fragments = [...input.context.fragments];
     let activeContent = input.context.active ? input.context.active.content : null;
     let text = composeFlowText(input, map, fragments, activeContent);
+    const multi = input.context.mounts.length > 1;
+    const mountOf = (path: string): string => (multi ? path.split('/')[0] : '');
     while (text.length > max && fragments.length) {
       let drop = fragments.length - 1;
       let lowest = fragments[drop].priority ?? 1;
@@ -437,6 +516,20 @@ function fitFlowText(input: FlowTextInput): UserBuilder {
         if (priority < lowest) {
           lowest = priority;
           drop = i;
+        }
+      }
+      if (multi) {
+        // Entre los de prioridad mínima se descarta el de la carpeta con más fragmentos (ninguna se queda sin contexto).
+        const counts = new Map<string, number>();
+        for (const f of fragments) counts.set(mountOf(f.path), (counts.get(mountOf(f.path)) ?? 0) + 1);
+        let most = counts.get(mountOf(fragments[drop].path)) ?? 0;
+        for (let i = fragments.length - 1; i >= 0; i--) {
+          if ((fragments[i].priority ?? 1) !== lowest) continue;
+          const count = counts.get(mountOf(fragments[i].path)) ?? 0;
+          if (count > most) {
+            most = count;
+            drop = i;
+          }
         }
       }
       fragments.splice(drop, 1);
@@ -481,7 +574,7 @@ function validUiSheets(raw: unknown, maxSheets: number, maxChars: number): UiFil
   return raw.filter((s) => s !== null && s !== undefined).map((s) => validUiFile(s, maxChars));
 }
 
-function decodeUiPlan(ctx: Obj): { input: Obj; change: Obj | null; htmlTexts: string[] } {
+function decodeUiPlan(ctx: Obj): { input: Obj; change: Obj | null } {
   if (json(ctx).length > MAX_UI_INPUT_CHARS) throw new AiError(t('invalid'));
   validFlowId(ctx['flowId']);
   const rc = ctx['component'];
@@ -517,11 +610,9 @@ function decodeUiPlan(ctx: Obj): { input: Obj; change: Obj | null; htmlTexts: st
   let change: unknown = ctx['change'];
   if (change === null || change === undefined) change = null;
   if (change !== null && (!isObj(change) || json(change).length > MAX_UI_CHANGE_JSON)) throw new AiError(t('invalid'));
-  const htmlTexts = [html.content, ...children.map((c) => (c['html'] as UiFile).content).filter((h) => !!h)];
   return {
     input: { component, children, globalCss: maskSensitiveText(globalCss), simulation: maskSensitiveJson(simulation) },
     change: change === null ? null : (maskSensitiveJson(change) as Obj),
-    htmlTexts,
   };
 }
 
@@ -593,6 +684,8 @@ export class HostAi {
   private readonly sources = new Map<string, vscode.CancellationTokenSource>();
   private readonly cache = new Map<string, { expires: number; value: unknown }>();
   private last: GeneratedFlow | null = null;
+  /** Último modelo elegido en el chat de Copilot (`request.model`); se reutiliza en las acciones del panel. */
+  private chatModel: { id: string; vendor: string; family: string } | null = null;
   /** Últimos flujos generados (máx. 10, solo en memoria), para reabrirlos por id. */
   private readonly recent = new Map<string, GeneratedFlow>();
   /** Propuestas de cambio por flujo (máx. 10 por flujo, solo en memoria), para reabrir «Simular cambios». */
@@ -622,6 +715,14 @@ export class HostAi {
     this.proposals.set(flowId, list);
   }
 
+  /** Guarda el mapa de datos generado en el flujo reciente (mismo objeto que `last`), para reabrirlo sin regenerarlo. */
+  rememberDbMap(flowId: string, dbMap: Obj): void {
+    const g = this.recent.get(flowId);
+    if (!g) return;
+    g.flow['dbMap'] = dbMap;
+    trazaLog().info(`DB_MAP · flujo=${flowId} · guardado en la sesión`);
+  }
+
   /** Propuestas guardadas de un flujo (copia). */
   proposalsFor(flowId: string): Obj[] {
     return [...(this.proposals.get(flowId) ?? [])];
@@ -647,7 +748,17 @@ export class HostAi {
    * elija en el QuickPick (se guarda; con un único modelo se usa sin preguntar). Cancelar el QuickPick → `cancelled`.
    */
   async resolveModel(preferred?: vscode.LanguageModelChat): Promise<vscode.LanguageModelChat> {
-    if (preferred) return preferred;
+    // El modelo elegido en el chat de Copilot manda también en las acciones del panel (simular, logs, BD…).
+    // El objeto de `request.model` solo vale durante esa petición: se guarda su id y se vuelve a pedir por id.
+    if (preferred) {
+      this.chatModel = { id: preferred.id, vendor: preferred.vendor, family: preferred.family };
+      return preferred;
+    }
+    if (this.chatModel) {
+      let models = await vscode.lm.selectChatModels({ id: this.chatModel.id });
+      if (!models.length) models = await vscode.lm.selectChatModels({ vendor: this.chatModel.vendor, family: this.chatModel.family });
+      if (models.length) return models[0];
+    }
     const configured = this.configuredModel();
     if (configured) {
       let models: vscode.LanguageModelChat[] = [];
@@ -806,18 +917,7 @@ export class HostAi {
       if (!text.trim()) throw new AiError(t('empty', lang).replace('{model}', modelLabel(model)));
       return text;
     } catch (error: unknown) {
-      if (error instanceof AiError) throw error;
-      if (timedOut) throw new AiError(t('timeout', lang));
-      if (token.isCancellationRequested || cts.token.isCancellationRequested) throw new Error('cancelled');
-      if (error instanceof vscode.LanguageModelError) {
-        console.warn('[Traza] Error del modelo.', error.code || error.name);
-        if (error.code === vscode.LanguageModelError.NoPermissions().code) throw new AiError(t('noPermissions', lang));
-        if (error.code === vscode.LanguageModelError.Blocked().code) throw new AiError(t('blocked', lang));
-        if (error.code === vscode.LanguageModelError.NotFound().code) throw new AiError(t('modelMissing', lang));
-        throw new AiError(`${t('failed', lang)} ${cut(error.message || '', 200)}`.trim());
-      }
-      console.warn('[Traza] Fallo al llamar al modelo.', error instanceof Error ? error.name : '');
-      throw new AiError(`${t('failed', lang)} ${error instanceof Error ? cut(error.message || '', 200) : ''}`.trim());
+      return this.modelFailure(error, timedOut, token, cts, lang);
     } finally {
       clearTimeout(timer);
       link.dispose();
@@ -826,9 +926,87 @@ export class HostAi {
     }
   }
 
+  /** Traduce el fallo de una llamada al modelo en un error apto para el usuario (o `cancelled`). */
+  private modelFailure(error: unknown, timedOut: boolean, token: vscode.CancellationToken, cts: vscode.CancellationTokenSource, lang: NexoLanguage): never {
+    if (error instanceof AiError) throw error;
+    if (timedOut) throw new AiError(t('timeout', lang));
+    if (token.isCancellationRequested || cts.token.isCancellationRequested) throw new Error('cancelled');
+    if (error instanceof vscode.LanguageModelError) {
+      console.warn('[Traza] Error del modelo.', error.code || error.name);
+      if (error.code === vscode.LanguageModelError.NoPermissions().code) throw new AiError(t('noPermissions', lang));
+      if (error.code === vscode.LanguageModelError.Blocked().code) throw new AiError(t('blocked', lang));
+      if (error.code === vscode.LanguageModelError.NotFound().code) throw new AiError(t('modelMissing', lang));
+      throw new AiError(`${t('failed', lang)} ${cut(error.message || '', 200)}`.trim());
+    }
+    console.warn('[Traza] Fallo al llamar al modelo.', error instanceof Error ? error.name : '');
+    throw new AiError(`${t('failed', lang)} ${error instanceof Error ? cut(error.message || '', 200) : ''}`.trim());
+  }
+
+  /** Como `call`, pero con herramientas: devuelve el texto y las llamadas a herramientas del stream de la respuesta. */
+  private async callTools(
+    model: vscode.LanguageModelChat,
+    messages: vscode.LanguageModelChatMessage[],
+    tools: vscode.LanguageModelChatTool[] | undefined,
+    token: vscode.CancellationToken,
+    lang: NexoLanguage,
+    allowEmpty = false,
+  ): Promise<{ text: string; calls: vscode.LanguageModelToolCallPart[]; other: number }> {
+    const cts = new vscode.CancellationTokenSource();
+    const link = linked(token, cts);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      cts.cancel();
+    }, CALL_TIMEOUT_MS);
+    const started = Date.now();
+    try {
+      this.showNoticeOnce();
+      const options: vscode.LanguageModelChatRequestOptions = {
+        justification: t('justification', lang),
+        ...(tools ? { tools, toolMode: vscode.LanguageModelChatToolMode.Auto } : {}),
+      };
+      const response = await model.sendRequest(messages, options, cts.token);
+      let text = '';
+      const calls: vscode.LanguageModelToolCallPart[] = [];
+      let other = 0;
+      for await (const part of response.stream) {
+        if (part instanceof vscode.LanguageModelTextPart) {
+          text += part.value;
+          if (text.length > MAX_RESPONSE_CHARS) {
+            cts.cancel();
+            throw new AiError(t('tooLarge', lang));
+          }
+        } else if (part instanceof vscode.LanguageModelToolCallPart) {
+          calls.push(part);
+        } else {
+          other++;
+        }
+      }
+      if (!allowEmpty && !text.trim() && !calls.length) throw new AiError(t('empty', lang).replace('{model}', modelLabel(model)));
+      return { text, calls, other };
+    } catch (error: unknown) {
+      return this.modelFailure(error, timedOut, token, cts, lang);
+    } finally {
+      clearTimeout(timer);
+      link.dispose();
+      cts.dispose();
+      console.info('[Traza] Llamada al modelo con herramientas.', Date.now() - started, 'ms');
+    }
+  }
+
+  /** El modelo y la versión de VS Code admiten llamadas a herramientas (API estable desde 1.95). */
+  private agentCapable(model: vscode.LanguageModelChat): boolean {
+    if (typeof vscode.LanguageModelToolCallPart !== 'function' || typeof vscode.LanguageModelToolResultPart !== 'function'
+      || typeof vscode.LanguageModelChatToolMode !== 'object') return false;
+    const caps = (model as unknown as { capabilities?: { supportsToolCalling?: boolean } }).capabilities;
+    return caps?.supportsToolCalling !== false;
+  }
+
   /**
    * Prompt de sistema como primer mensaje User (no hay rol system estable), texto de usuario ajustado, parseo y
-   * validación; si falla, un reintento conversacional con los errores. Respuestas válidas en caché (LRU, 15 min).
+   * comprobación de FORMATO (esquema con recorte mecánico previo + reglas de forma): si la respuesta no se puede dibujar,
+   * hasta MAX_FORMAT_ATTEMPTS intentos en total, cada reintento con las rutas con problema y el formato esperado.
+   * Nunca se vuelve a preguntar por el contenido. Respuestas válidas en caché (LRU, 15 min).
    */
   private async runJson(op: PromptOp, system: string, build: UserBuilder, check: (root: Obj) => Validation | Promise<Validation>, opts: RunOptions): Promise<{ value: unknown; cached: boolean }> {
     const { model, token, language: lang } = opts;
@@ -851,20 +1029,19 @@ export class HostAi {
       return { text, result: result.value === undefined ? { ...result, value: root } : result };
     };
     let { text, result } = await attempt(messages);
-    if (result.errors.length) {
-      console.warn('[Traza] Respuesta no válida; reintento.', op, result.errors.length);
-      logValidation(op, model, 1, text, result.errors);
+    for (let n = 1; result.errors.length; n++) {
+      logValidation(op, model, n, text, result.errors);
+      if (n >= MAX_FORMAT_ATTEMPTS) {
+        console.warn('[Traza] Respuesta no legible tras los intentos.', op, result.errors.length);
+        throw new AiError(t('schema', lang));
+      }
+      trazaLog().warn(`${op} · formato no legible · reintento ${n} de ${MAX_FORMAT_ATTEMPTS - 1}`);
       const retry = [
         ...messages,
         vscode.LanguageModelChatMessage.Assistant(cut(text, MAX_RETRY_ASSISTANT_CHARS)),
-        vscode.LanguageModelChatMessage.User(`## ERRORES DE VALIDACION DE TU RESPUESTA ANTERIOR\n${result.errors.slice(0, 20).join('\n')}\nDevuelve de nuevo el JSON completo corregido.`),
+        vscode.LanguageModelChatMessage.User(formatFeedback(FORMAT_DEFINITION[op] ?? null, result.errors, n + 1, MAX_FORMAT_ATTEMPTS)),
       ];
       ({ text, result } = await attempt(retry));
-      if (result.errors.length) {
-        console.warn('[Traza] Respuesta no válida tras el reintento.', op, result.errors.length);
-        logValidation(op, model, 2, text, result.errors);
-        throw new AiError(t('schema', lang));
-      }
     }
     this.cachePut(key, result.value);
     return { value: result.value, cached: false };
@@ -907,8 +1084,11 @@ export class HostAi {
         run = await this.runJson(operation as PromptOp, systemFor(operation as PromptOp), fitCode(d.flow, d.code, null, tail), (root) => {
           delete root['uiRef'];
           delete root['uiRefAfter'];
-          const errors = validate(simulate ? 'SimulationResult' : 'LogAnalysisResult', root);
-          return { errors: errors.length ? errors : semantics(root, d.flow, simulate, lineCount) };
+          const definition = simulate ? 'SimulationResult' : 'LogAnalysisResult';
+          clampToSchema(definition, root);
+          const errors = validate(definition, root);
+          if (!errors.length) repairDiagnosis(root, lineCount, simulate);
+          return { errors };
         }, opts);
       } else if (kind === 'ui-plan') {
         const ui = decodeUiPlan(ctx);
@@ -916,8 +1096,10 @@ export class HostAi {
         if (user.length > MAX_UI_PROMPT_CHARS) throw new AiError(t('uiTooLarge', lang));
         operation = 'UI_PLAN';
         run = await this.runJson('UI_PLAN', systemFor('UI_PLAN'), () => user, (root) => {
+          clampToSchema('UiPreviewPlan', root);
+          repairUiPlan(root);
           const errors = validate('UiPreviewPlan', root);
-          return { errors: errors.length ? errors : uiPlanErrors(root, ui.htmlTexts) };
+          return { errors: errors.length ? errors : uiPlanErrors(root) };
         }, opts);
       } else {
         const d = decodeDiagnosis(ctx);
@@ -928,15 +1110,25 @@ export class HostAi {
         const empty = !isObj(schema) || !Object.keys(schema).length;
         const tail = `## ESQUEMA REAL\n${empty ? '(sin conexion)' : json(schema)}\n\n${idiomaTail(lang)}`;
         operation = 'DB_MAP';
+        const dbFlowId = typeof ctx['flowId'] === 'string' ? ctx['flowId'].slice(0, 64) : '?';
+        const t0 = Date.now();
+        trazaLog().info(`DB_MAP · flujo=${dbFlowId} · inicio · esquema=${empty ? 'código' : 'real'}`);
+        try {
         run = await this.runJson('DB_MAP', systemFor('DB_MAP'), fitCode(d.flow, d.code, null, tail), (raw) => {
           // Algunos modelos envuelven la respuesta con el nombre de la definición: {"FlowDbMap": {...}}.
           const wrapped = raw['FlowDbMap'];
           const root = Object.keys(raw).length === 1 && isObj(wrapped) ? { ...wrapped } : raw;
+          clampToSchema('FlowDbMap', root);
           const errors = validate('FlowDbMap', root);
           if (errors.length) return { errors };
           repairDbMap(root, d.flow);
           return { errors: dbMapErrors(root, d.flow), value: root };
         }, opts);
+        trazaLog().info(`DB_MAP · flujo=${dbFlowId} · listo · cached=${run.cached} · ${Date.now() - t0} ms`);
+        } catch (error) {
+          trazaLog().warn(`DB_MAP · flujo=${dbFlowId} · ${isCancelled(error) ? 'cancelado' : 'error'} · ${Date.now() - t0} ms`);
+          throw error;
+        }
       }
       return { success: true, codigo: 'OK', mensaje: null, operation, result: run.value, model: modelLabel(model), usage: null, cached: run.cached };
     } finally {
@@ -977,14 +1169,15 @@ export class HostAi {
       const title = typeof ctx['title'] === 'string' ? cut(ctx['title'].trim(), MAX_CHANGE_TITLE) : '';
       const summary = typeof ctx['summary'] === 'string' ? cut(ctx['summary'].trim(), MAX_CHANGE_SUMMARY) : '';
       let afterCode: CodeWindow[];
+      let unapplied = false;
       try {
         afterCode = afterWindows(d.code, files);
       } catch (error: unknown) {
-        if (error instanceof PatchError) {
-          console.warn('[Traza] El cambio no encaja.', error.message);
-          throw new AiError(t('noFit', lang));
-        }
-        throw error;
+        if (!(error instanceof PatchError)) throw error;
+        // No es un error: el modelo razona el después con el código original y el diff.
+        afterCode = d.code;
+        unapplied = true;
+        trazaLog().info(`Comparar · cambio no aplicable a las ventanas (${error.message}); el modelo razona el despues con el diff`);
       }
       const changeText = changeDiff({ title, summary, files });
       trazaLog().info(`Comparar · casos=${cases.length} · ventanas=${d.code.length} (${d.code.reduce((n, w) => n + w.content.length, 0)} caracteres) · despues=${afterCode.length}`);
@@ -993,8 +1186,10 @@ export class HostAi {
       const simulateCheck = (root: Obj): Validation => {
         delete root['uiRef'];
         delete root['uiRefAfter'];
+        clampToSchema('SimulationResult', root);
         const errors = validate('SimulationResult', root);
-        return { errors: errors.length ? errors : semantics(root, d.flow, true, 0) };
+        if (!errors.length) repairDiagnosis(root, 0, true);
+        return { errors };
       };
       type Job = { index: number; after: boolean };
       const jobs: Job[] = cases.flatMap((_, index) => [{ index, after: false }, { index, after: true }]);
@@ -1007,7 +1202,7 @@ export class HostAi {
           const input = cases[job.index].input;
           try {
             const run = job.after
-              ? await this.runJson('SIMULATE_AFTER', systemFor('SIMULATE_AFTER'), fitCode(d.flow, afterCode, changeText, simulateTail(input, lang)), simulateCheck, opts)
+              ? await this.runJson('SIMULATE_AFTER', systemFor('SIMULATE_AFTER'), fitCode(d.flow, afterCode, changeText, unapplied ? `${UNAPPLIED_NOTE}${simulateTail(input, lang)}` : simulateTail(input, lang)), simulateCheck, opts)
               : await this.runJson('SIMULATE_BEFORE', systemFor('SIMULATE_BEFORE'), fitCode(d.flow, d.code, changeText, simulateTail(input, lang), false), simulateCheck, opts);
             results[job.index][job.after ? 1 : 0] = run;
           } catch (error: unknown) {
@@ -1122,6 +1317,162 @@ export class HostAi {
     };
   }
 
+  /**
+   * Modo agente (FLOW y PROPOSE): el modelo investiga por su cuenta todas las carpetas con `traza_search`, `traza_read` y
+   * `traza_list` (solo lectura); el contexto semilla es solo un punto de partida. Los límites son de presupuesto (rondas,
+   * llamadas, caracteres y tiempo), nunca de carpetas o archivos. Devuelve el valor con el formato comprobado (hasta
+   * MAX_FORMAT_ATTEMPTS intentos; después, error), o `null` para ejecutar el modo clásico ante fallos de transporte,
+   * API o herramientas y ante «sin respuesta final». Cancelación y timeout se relanzan.
+   */
+  private async runAgent(args: {
+    op: 'FLOW' | 'PROPOSE';
+    model: vscode.LanguageModelChat;
+    token: vscode.CancellationToken;
+    lang: NexoLanguage;
+    progress?: (message: string) => void;
+    seed: (session: AgentToolSession) => Promise<FlowContext>;
+    build: (context: FlowContext, session: AgentToolSession) => UserBuilder;
+    check: (root: Obj) => Validation | Promise<Validation>;
+    /** Presupuesto de tiempo de investigación (por defecto `AGENT_TIME_MS`). */
+    timeMs?: number;
+  }): Promise<unknown> {
+    const { op, model, token, lang } = args;
+    const log = trazaLog();
+    const started = Date.now();
+    let rounds = 0;
+    let convChars = 0;
+    let stage = 'semilla';
+    const timeLimit = args.timeMs ?? AGENT_TIME_MS;
+    const say = (es: string, en: string): void => args.progress?.(lang === 'en' ? en : es);
+    const sayGenerating = (): void => (op === 'FLOW' ? say('Generando el flujo…', 'Generating the flow…') : say('Proponiendo el cambio…', 'Proposing the change…'));
+    try {
+      const session = new AgentToolSession({ token, lang, progress: args.progress });
+      await session.init();
+      const context = await args.seed(session);
+      for (const fragment of context.fragments) session.markRead(fragment.path, fragment.startLine, fragment.endLine);
+      if (context.active) session.markRead(context.active.path, context.active.startLine, context.active.endLine);
+      const system = systemFor(op, 'es', true);
+      const user = await this.fitUser(model, system, args.build(context, session), AGENT_SEED_CHARS, token);
+      const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(system), vscode.LanguageModelChatMessage.User(user)];
+      const budget = Math.floor((model.maxInputTokens || DEFAULT_MAX_INPUT_TOKENS) * TOKEN_BUDGET_RATIO) * CHARS_PER_TOKEN;
+      convChars = system.length + user.length;
+      let totalCalls = 0;
+      let fixes = 0;
+      let finishing = false;
+      let empties = 0;
+      const outOfBudget = (): boolean => rounds >= AGENT_MAX_ROUNDS - 1 || totalCalls >= AGENT_MAX_CALLS
+        || Date.now() - started >= timeLimit || budget - convChars < AGENT_RESERVE_CHARS + AGENT_MIN_RESULT_CHARS;
+      const finish = (end: string): void => log.info(`Agente · ${op} · rondas=${rounds} · ${session.summary()} · conversación=${convChars} · fin=${end}`);
+      say('Investigando el código en todas las carpetas…', 'Investigating the code in all folders…');
+      while (rounds < AGENT_MAX_ROUNDS) {
+        if (token.isCancellationRequested) throw new Error('cancelled');
+        if (!finishing && outOfBudget()) {
+          finishing = true;
+          messages.push(vscode.LanguageModelChatMessage.User(AGENT_BUDGET_NOTE));
+          convChars += AGENT_BUDGET_NOTE.length;
+        }
+        rounds++;
+        stage = `ronda ${rounds}`;
+        const reply = await this.callTools(model, messages, finishing ? undefined : AGENT_TOOLS, token, lang, true);
+        if (!reply.calls.length && !reply.text.trim()) {
+          if (empties < 1) {
+            empties++;
+            messages.push(vscode.LanguageModelChatMessage.User(AGENT_EMPTY_NOTE));
+            convChars += AGENT_EMPTY_NOTE.length;
+            continue;
+          }
+          log.warn(`Agente · ${op} · modo clásico (respuesta vacía · otras=${reply.other})`);
+          return null;
+        }
+        if (reply.calls.length) {
+          messages.push(vscode.LanguageModelChatMessage.Assistant([
+            ...(reply.text ? [new vscode.LanguageModelTextPart(reply.text)] : []), ...reply.calls,
+          ]));
+          convChars += reply.text.length + reply.calls.reduce((n, call) => n + call.name.length + json(call.input).length, 0);
+          const parts: vscode.LanguageModelToolResultPart[] = [];
+          let inRound = 0;
+          let exhausted = false;
+          for (const call of reply.calls) {
+            let out: string;
+            if (finishing) {
+              out = 'omitida: investigación terminada; responde con el JSON final';
+            } else if (inRound >= AGENT_MAX_CALLS_PER_ROUND || totalCalls >= AGENT_MAX_CALLS) {
+              out = 'omitida: límite de llamadas';
+            } else {
+              const maxChars = Math.min(AGENT_TOOL_RESULT_CHARS, budget - convChars - AGENT_RESERVE_CHARS);
+              if (maxChars < AGENT_MIN_RESULT_CHARS) {
+                out = 'omitida: presupuesto agotado';
+                exhausted = true;
+              } else {
+                inRound++;
+                totalCalls++;
+                out = await session.invoke(call.name, call.input, maxChars);
+              }
+            }
+            convChars += out.length;
+            parts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(out)]));
+          }
+          // El modo «Auto» de Copilot enruta por el texto del último mensaje de usuario: sin texto falla
+          // («Auto mode needs a prompt»), así que los resultados van siempre acompañados de una indicación.
+          const closing = !finishing && (exhausted || outOfBudget());
+          if (closing) finishing = true;
+          const note = closing ? AGENT_BUDGET_NOTE : AGENT_CONTINUE_NOTE;
+          messages.push(vscode.LanguageModelChatMessage.User([...parts, new vscode.LanguageModelTextPart(note)]));
+          convChars += note.length;
+          sayGenerating();
+          continue;
+        }
+
+        const answer = reply.text;
+        let errors: string[] = [];
+        let value: unknown = null;
+        let root: Obj | null = null;
+        try {
+          root = parseModelJson(answer);
+        } catch (error: unknown) {
+          errors = [`$: la respuesta no es un objeto JSON valido (${error instanceof Error ? error.message : ''})`];
+        }
+        if (root) {
+          const result = await args.check(root);
+          value = result.value ?? root;
+          errors = [...result.errors];
+        }
+        if (!errors.length) {
+          finish(finishing ? 'presupuesto' : 'ok');
+          return value;
+        }
+        if (fixes < AGENT_MAX_FIXES && rounds < AGENT_MAX_ROUNDS) {
+          let note = formatFeedback(FORMAT_DEFINITION[op] ?? null, errors, fixes + 2, MAX_FORMAT_ATTEMPTS);
+          fixes++;
+          log.warn(`Agente · ${op} · formato no legible · reintento ${fixes} de ${AGENT_MAX_FIXES}`);
+          if (!finishing) note += '\nPuedes usar las herramientas si lo necesitas.';
+          if (!finishing && outOfBudget()) {
+            finishing = true;
+            note += `\n${AGENT_BUDGET_NOTE}`;
+          }
+          messages.push(vscode.LanguageModelChatMessage.Assistant(cut(answer, MAX_RETRY_ASSISTANT_CHARS)));
+          messages.push(vscode.LanguageModelChatMessage.User(note));
+          convChars += Math.min(answer.length, MAX_RETRY_ASSISTANT_CHARS) + note.length;
+          sayGenerating();
+          continue;
+        }
+        logValidation(op, model, fixes + 1, answer, errors);
+        log.warn(`Agente · ${op} · formato no legible tras ${fixes + 1} intentos`);
+        throw new AiError(t('schema', lang));
+      }
+      log.warn(`Agente · ${op} · modo clásico (sin respuesta final)`);
+      return null;
+    } catch (error: unknown) {
+      if (isCancelled(error) || token.isCancellationRequested) throw error;
+      if (error instanceof AiError && [t('timeout', lang), t('noPermissions', lang), t('blocked', lang), t('modelMissing', lang), t('schema', lang)].includes(error.message)) throw error;
+      const name = error instanceof Error ? error.name : 'Error';
+      const reason = `Agente · ${op} · modo clásico (${name}: ${logSafe(error instanceof Error ? error.message : String(error))} · etapa=${stage})`;
+      log.warn(reason);
+      console.warn('[Traza] Modo agente no disponible; modo clásico.', reason);
+      return null;
+    }
+  }
+
   private remember(generated: GeneratedFlow): void {
     const id = generated.flow['id'];
     if (typeof id !== 'string') return;
@@ -1145,24 +1496,48 @@ export class HostAi {
     const global = this.globalToken(options.token);
     const token = global.cts.token;
     try {
-      const context = await collectFlowContext({
-        question: maskSensitiveText(question),
-        pinned: options.pinned,
-        useActiveEditor: options.useActiveEditor,
-        ...(options.folder ? { folder: options.folder } : {}),
-        token,
-        progress: options.progress,
-        log: trazaLog(),
-        selectFiles: (input) => this.selectFiles(model, input, token, lang),
-      });
-      options.progress?.(lang === 'en' ? 'Generating the flow…' : 'Generando el flujo…');
-      const build = fitFlowText({ mode: 'FLOW', question: maskSensitiveText(question), context, lang, scenarioHint: options.scenario === true });
-      const run = await this.runJson('FLOW', systemFor('FLOW'), build, (root) => {
+      const masked = maskSensitiveText(question);
+      const flowCheck = (root: Obj): Validation => {
+        clampToSchema('FlowDiagram', root, FLOW_KEEP_ARRAYS);
         dropInvalidScenario(root);
         const errors = validate('FlowDiagram', root);
         return { errors: errors.length ? errors : flowSemantics(root) };
-      }, { model, token, language: lang });
-      const flow: Obj = { ...(run.value as Obj) };
+      };
+      const log = trazaLog();
+      const pinnedHints = (session: AgentToolSession): string[] => options.pinned.map((p) => session.pathOfUri(p.uri)).filter((p): p is string => !!p);
+      const classicContext = (folder: string | undefined, tk: vscode.CancellationToken): Promise<FlowContext> => collectFlowContext({
+        question: masked,
+        pinned: options.pinned,
+        useActiveEditor: options.useActiveEditor,
+        ...(folder ? { folder } : {}),
+        token: tk,
+        progress: options.progress,
+        log,
+        selectFiles: (input) => this.selectFiles(model, input, tk, lang),
+      });
+      let generated: unknown = null;
+      if (this.agentCapable(model)) {
+        generated = await this.runAgent({
+          op: 'FLOW', model, token, lang, progress: options.progress,
+          seed: (): Promise<FlowContext> => collectFlowContext({
+            question: masked, pinned: options.pinned, useActiveEditor: options.useActiveEditor, token, progress: options.progress, log,
+          }),
+          build: (context, session) => fitFlowText({
+            mode: 'FLOW', question: masked, context, lang, scenarioHint: options.scenario === true,
+            overview: session.overview(), ...(options.folder ? { focusFolder: options.folder } : {}),
+            hintFiles: pinnedHints(session),
+          }),
+          check: flowCheck,
+        });
+      }
+      if (generated === null) {
+        const context = await classicContext(options.folder, token);
+        options.progress?.(lang === 'en' ? 'Generating the flow…' : 'Generando el flujo…');
+        const build = fitFlowText({ mode: 'FLOW', question: masked, context, lang, scenarioHint: options.scenario === true });
+        generated = (await this.runJson('FLOW', systemFor('FLOW'), build, flowCheck, { model, token, language: lang })).value;
+      }
+
+      const flow: Obj = { ...(generated as Obj) };
       flow['id'] = crypto.randomUUID();
       flow['model'] = modelLabel(model);
       flow['generatedAt'] = new Date().toISOString();
@@ -1210,14 +1585,9 @@ export class HostAi {
         const path = multi && mountId ? `${mountId}/${ref['file']}` : ref['file'];
         if (!pinnedPaths.includes(path)) pinnedPaths.push(path);
       }
-      const context = await collectFlowContext({
-        question: maskSensitiveText(question), pinned: options.pinned ?? [], pinnedPaths, useActiveEditor: false, token, progress: options.progress, log: trazaLog(),
-        selectFiles: (input) => this.selectFiles(model, input, token, lang), prioritizeRequest: true,
-      });
-      options.progress?.(lang === 'en' ? 'Proposing the change…' : 'Proponiendo el cambio…');
+      const masked = maskSensitiveText(question);
       const activeFlow = json(stripFlow(flow));
-      const build = fitFlowText({ mode: 'PROPOSE', question: maskSensitiveText(question), context, activeFlow, lang });
-      const run = await this.runJson('PROPOSE', systemFor('PROPOSE'), build, async (raw) => {
+      const proposeCheck = async (raw: Obj): Promise<Validation> => {
         let root: Obj = raw;
         let files = root['files'];
         if (files === undefined || files === null) {
@@ -1240,12 +1610,37 @@ export class HostAi {
         delete change['answer'];
         change['id'] = crypto.randomUUID();
         change['request'] = cut(question, MAX_QUESTION_CHARS);
+        clampToSchema('ChangeProposal', change, PROPOSE_KEEP_ARRAYS);
         let errors = validate('ChangeProposal', change);
         if (!errors.length) errors = proposeSemantics(change, mountIds);
-        if (!errors.length) errors = await this.fitErrors(change, multi);
+        if (!errors.length) errors = await this.privateFileErrors(change, multi);
         return errors.length ? { errors } : { errors: [], value: { change } };
-      }, { model, token, language: lang });
-      const value = run.value as { answer?: string; change?: Obj };
+      };
+      let proposed: unknown = null;
+      if (this.agentCapable(model)) {
+        proposed = await this.runAgent({
+          op: 'PROPOSE', model, token, lang, progress: options.progress,
+          seed: (): Promise<FlowContext> => collectFlowContext({
+            question: masked, pinned: options.pinned ?? [], pinnedPaths, useActiveEditor: false, token, progress: options.progress, log: trazaLog(),
+            prioritizeRequest: true,
+          }),
+          build: (context, session) => fitFlowText({
+            mode: 'PROPOSE', question: masked, context, activeFlow, lang,
+            overview: session.overview(), hintFiles: pinnedPaths.slice(0, AGENT_MAX_HINT_FILES),
+          }),
+          check: proposeCheck,
+        });
+      }
+      if (proposed === null) {
+        const context = await collectFlowContext({
+          question: masked, pinned: options.pinned ?? [], pinnedPaths, useActiveEditor: false, token, progress: options.progress, log: trazaLog(),
+          selectFiles: (input) => this.selectFiles(model, input, token, lang), prioritizeRequest: true,
+        });
+        options.progress?.(lang === 'en' ? 'Proposing the change…' : 'Proponiendo el cambio…');
+        const build = fitFlowText({ mode: 'PROPOSE', question: masked, context, activeFlow, lang });
+        proposed = (await this.runJson('PROPOSE', systemFor('PROPOSE'), build, proposeCheck, { model, token, language: lang })).value;
+      }
+      const value = proposed as { answer?: string; change?: Obj };
       if (typeof value.answer === 'string') return { answer: value.answer };
       const proposal: Obj = { ...(value.change as Obj) };
       proposal['id'] = crypto.randomUUID();
@@ -1265,8 +1660,11 @@ export class HostAi {
     }
   }
 
-  /** Comprueba que cada archivo de la propuesta encaja con el archivo actual del workspace. */
-  private async fitErrors(change: Obj, multi: boolean): Promise<string[]> {
+  /**
+   * Seguridad, no contenido: rechaza archivos con claves privadas. Que el diff encaje con el archivo actual, que exista
+   * o no exista ya, no se comprueba aquí (la propuesta se dibuja siempre; Aplicar bloquea si no encaja).
+   */
+  private async privateFileErrors(change: Obj, multi: boolean): Promise<string[]> {
     const errors: string[] = [];
     const files = Array.isArray(change['files']) ? change['files'] : [];
     for (let i = 0; i < files.length; i++) {
@@ -1281,21 +1679,7 @@ export class HostAi {
         }
       }
       const original = await readMountFile(mountId, path, 'text', MAX_FILE_READ_BYTES);
-      if (PRIVATE_KEY_CHECK.test(original ?? '')) {
-        errors.push(`$.files[${i}]: archivo no permitido`);
-        continue;
-      }
-      const status = txt(file['status']);
-      if (status === 'added') {
-        if (original !== null) errors.push(`$.files[${i}]: el archivo ya existe (usa status "modified")`);
-        continue;
-      }
-      if (original === null) {
-        errors.push(`$.files[${i}]: el archivo no existe o no se puede leer`);
-        continue;
-      }
-      const result = applyFileChange(original, file as unknown as FileChange);
-      if (!result.ok) errors.push(`$.files[${i}]: el bloque no encaja con el archivo actual (copia las líneas de contexto exactas y usa oldStart real)`);
+      if (PRIVATE_KEY_CHECK.test(original ?? '')) errors.push(`$.files[${i}]: archivo no permitido`);
     }
     return errors.slice(0, 20);
   }

@@ -10,7 +10,9 @@ type Obj = Record<string, unknown>;
 const MAX_ERRORS = 20;
 const MAX_CHANGE_CHARS = 20000;
 const MAX_PATH_CHARS = 400;
-const SELECTOR_TOKEN = /([.#])(-?[A-Za-z_][A-Za-z0-9_-]*)/g;
+const MAX_HUNKS = 40;
+const MAX_HUNK_LINES = 400;
+const MAX_LINE_TEXT = 2000;
 
 export function isObj(value: unknown): value is Obj {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -183,39 +185,23 @@ export function changeDiff(change: unknown): string | null {
 /* --------------------------- SIMULATE / LOGS --------------------------- */
 
 /**
- * failStepId en pasos o null; ok/none sin paso; error/stop con paso; executed/skipped/seen dentro de los pasos;
- * evidence.index menor que el número de líneas de los logs.
+ * Adaptación para dibujar (sin reintentos): en LOGS se quitan las evidencias con `index` fuera del número de líneas de
+ * los logs. Los ids de pasos desconocidos y la coherencia kind/failStepId los tolera la webview.
  */
-export function semantics(result: unknown, flow: unknown, simulate: boolean, logLines: number): string[] {
-  const errors: string[] = [];
-  const steps = stepIds(flow);
-  const kind = txt(at(result, 'kind'));
-  const fail = at(result, 'failStepId');
-  const hasFail = !isNullish(fail);
-  if (hasFail && !steps.has(txt(fail))) errors.push('$.failStepId: no es un id de steps del FLUJO');
-  if ((kind === 'ok' || kind === 'none') && hasFail) errors.push(`$.failStepId: debe ser null cuando kind es ${kind}`);
-  if ((kind === 'error' || kind === 'stop') && !hasFail) errors.push(`$.failStepId: obligatorio cuando kind es ${kind}`);
-  const names = simulate ? ['executedStepIds', 'skippedStepIds'] : ['seenStepIds'];
-  for (const name of names) {
-    list(at(result, name)).forEach((id, i) => {
-      if (!steps.has(txt(id))) errors.push(`$.${name}[${i}]: no es un id de steps del FLUJO`);
-    });
-  }
-  if (!simulate) {
-    list(at(result, 'evidence')).forEach((e, i) => {
-      const index = at(e, 'index');
-      const n = typeof index === 'number' ? Math.trunc(index) : -1;
-      if (n >= logLines) errors.push(`$.evidence[${i}].index: fuera de los logs (${logLines} lineas)`);
-      const stepId = at(e, 'stepId');
-      if (!isNullish(stepId) && !steps.has(txt(stepId))) errors.push(`$.evidence[${i}].stepId: no es un id de steps del FLUJO ni null`);
-    });
-  }
-  return limit(errors);
+export function repairDiagnosis(result: Obj, logLines: number, simulate: boolean): void {
+  if (simulate) return;
+  const evidence = result['evidence'];
+  if (!Array.isArray(evidence)) return;
+  result['evidence'] = evidence.filter((e) => {
+    const index = at(e, 'index');
+    const n = typeof index === 'number' ? Math.trunc(index) : -1;
+    return n < logLines;
+  });
 }
 
 /* --------------------------------- FLOW --------------------------------- */
 
-/** Ids de carriles y pasos únicos, from/to en carriles, errorExits y presets con pasos existentes. */
+/** Ids de carriles y pasos únicos y no vacíos; from/to de los pasos deben ser carriles. */
 export function flowSemantics(flow: unknown): string[] {
   const errors: string[] = [];
   const lanes = new Set<string>();
@@ -232,42 +218,16 @@ export function flowSemantics(flow: unknown): string[] {
     if (!lanes.has(txt(at(step, 'from')))) errors.push(`$.steps[${i}].from: no es un id de lanes`);
     if (!lanes.has(txt(at(step, 'to')))) errors.push(`$.steps[${i}].to: no es un id de lanes`);
   });
-  list(at(flow, 'errorExits')).forEach((exit, i) => {
-    if (!steps.has(txt(at(exit, 'stepId')))) errors.push(`$.errorExits[${i}].stepId: no es un id de steps`);
-  });
-  list(at(flow, 'simulationPresets')).forEach((preset, i) => {
-    const fail = at(at(preset, 'expected'), 'failStepId');
-    if (!isNullish(fail) && !steps.has(txt(fail))) errors.push(`$.simulationPresets[${i}].expected.failStepId: no es un id de steps ni null`);
-  });
   return limit(errors);
 }
 
 /**
- * "scenario" es opcional: si no cumple el esquema FlowScenario o sus ids no son pasos del flujo, se quita en silencio
- * (sin invalidar el FLOW ni provocar reintentos).
+ * "scenario" es opcional: si no cumple el esquema FlowScenario, se quita en silencio (sin invalidar el FLOW ni provocar
+ * reintentos). Los ids de pasos desconocidos los ignora la webview.
  */
 export function dropInvalidScenario(root: Obj): void {
   if (!('scenario' in root)) return;
-  const scenario = root['scenario'];
-  const errors = [...validate('FlowScenario', scenario)];
-  if (!errors.length) {
-    const steps = new Set<string>();
-    for (const step of list(root['steps'])) {
-      const id = txt(at(step, 'id'));
-      if (id) steps.add(id);
-    }
-    const result = at(scenario, 'result');
-    const fail = at(result, 'failStepId');
-    const failIsNull = isNullish(fail);
-    if (!failIsNull && !steps.has(txt(fail))) errors.push('$.scenario.result.failStepId: no es un id de steps ni null');
-    for (const field of ['executedStepIds', 'skippedStepIds']) {
-      list(at(result, field)).forEach((id, i) => {
-        if (!steps.has(txt(id))) errors.push(`$.scenario.result.${field}[${i}]: no es un id de steps`);
-      });
-    }
-    const kind = txt(at(result, 'kind'));
-    if ((kind === 'error' || kind === 'stop') && failIsNull) errors.push('$.scenario.result.failStepId: obligatorio con kind error/stop');
-  }
+  const errors = validate('FlowScenario', root['scenario']);
   if (errors.length) {
     delete root['scenario'];
     console.warn('[Traza] Escenario del flujo descartado.', errors.length);
@@ -289,7 +249,11 @@ export function normalizeProposalPath(raw: string | null | undefined): string | 
   return p;
 }
 
-/** Rutas relativas válidas, pares (mountId, path) únicos, mountId de MONTAJES o "", added/deleted/modified coherentes. */
+/**
+ * Rutas relativas válidas, pares (mountId, path) únicos, mountId de MONTAJES o "", added/deleted/modified coherentes y
+ * los límites de forma que la webview exige para dibujar (40 bloques por archivo, 1-400 líneas por bloque, texto de una
+ * sola línea de como mucho 2000 caracteres). En un archivo `added` se fija `oldStart = 0` (arreglo mecánico).
+ */
 export function proposeSemantics(change: unknown, mountIds: Set<string>): string[] {
   const errors: string[] = [];
   const pairs = new Set<string>();
@@ -306,12 +270,19 @@ export function proposeSemantics(change: unknown, mountIds: Set<string>): string
     }
     const status = txt(at(file, 'status'));
     let changes = false;
-    list(at(file, 'hunks')).forEach((hunk, j) => {
-      const oldStart = at(hunk, 'oldStart');
-      if (status === 'added' && (typeof oldStart === 'number' ? Math.trunc(oldStart) : -1) !== 0) {
-        errors.push(`${base}.hunks[${j}].oldStart: debe ser 0 en un archivo nuevo`);
-      }
-      for (const line of list(at(hunk, 'lines'))) {
+    const hunks = list(at(file, 'hunks'));
+    if (hunks.length > MAX_HUNKS) errors.push(`${base}.hunks: como mucho ${MAX_HUNKS} bloques`);
+    hunks.forEach((hunk, j) => {
+      if (status === 'added' && isObj(hunk)) hunk['oldStart'] = 0;
+      const lines = list(at(hunk, 'lines'));
+      if (lines.length < 1 || lines.length > MAX_HUNK_LINES) errors.push(`${base}.hunks[${j}].lines: entre 1 y ${MAX_HUNK_LINES} lineas`);
+      lines.forEach((line, k) => {
+        const text = at(line, 'text');
+        if (typeof text === 'string' && (text.length > MAX_LINE_TEXT || text.includes('\n') || text.includes('\r'))) {
+          errors.push(`${base}.hunks[${j}].lines[${k}].text: una sola linea de como mucho ${MAX_LINE_TEXT} caracteres`);
+        }
+      });
+      for (const line of lines) {
         const kind = txt(at(line, 'kind'));
         if (kind !== 'context') changes = true;
         if (status === 'added' && kind !== 'add') {
@@ -331,15 +302,25 @@ export function proposeSemantics(change: unknown, mountIds: Set<string>): string
 
 /* -------------------------------- DB_MAP -------------------------------- */
 
+/** Neutraliza '<' (nunca se inserta HTML). */
+function defang(text: string): string {
+  return text.replace(/</g, '‹');
+}
+
 function checkNoMarkup(value: unknown, path: string, errors: string[]): void {
   if (typeof value === 'string' && value.includes('<')) errors.push(`${path}: no puede contener '<'`);
 }
 
+/** Máximo de claves de `values` por acceso (el esquema lo deja abierto). */
+const DB_MAX_VALUES = 16;
+
 /**
  * Repara un FlowDbMap ya válido contra el esquema: quita relaciones y accesos con tablas o pasos desconocidos, deja un
- * acceso por paso, pone via a null si no es una tabla declarada y recorta values a 8 textos de 40 caracteres.
+ * acceso por paso, pone via a null si no es una tabla declarada, recorta values a 16 textos de 40 caracteres y
+ * neutraliza '<' (por '‹') en los textos libres para no insertar nunca marcado.
  */
 export function repairDbMap(map: Obj, flow: unknown): void {
+  if (typeof map['summary'] === 'string') map['summary'] = defang(map['summary']);
   const steps = stepIds(flow);
   const tables = new Set<string>();
   for (const table of list(map['tables'])) tables.add(txt(at(table, 'name')));
@@ -351,14 +332,16 @@ export function repairDbMap(map: Obj, flow: unknown): void {
     if (!isObj(node) || !steps.has(stepId) || !tables.has(txt(node['table'])) || seen.has(stepId)) continue;
     seen.add(stepId);
     const a: Obj = { ...node };
+    if (typeof a['note'] === 'string') a['note'] = defang(a['note']);
+    if (typeof a['fn'] === 'string') a['fn'] = defang(a['fn']);
     if (typeof a['via'] === 'string' && !tables.has(a['via'])) a['via'] = null;
     const values = a['values'];
     if (isObj(values)) {
       const clean: Obj = {};
       for (const [key, value] of Object.entries(values)) {
-        if (Object.keys(clean).length >= 8 || value === null) continue;
+        if (Object.keys(clean).length >= DB_MAX_VALUES || value === null) continue;
         const v = typeof value === 'string' ? value : JSON.stringify(value);
-        clean[key] = v.length > 40 ? `${v.slice(0, 39)}…` : v;
+        clean[key] = defang(v.length > 40 ? `${v.slice(0, 39)}…` : v);
       }
       a['values'] = clean;
     }
@@ -369,7 +352,7 @@ export function repairDbMap(map: Obj, flow: unknown): void {
 
 /**
  * Reglas del FlowDbMap que el esquema no expresa: stepId de los pasos del FLUJO (uno por paso), tablas declaradas en
- * accesses/via/relations, values con como mucho 8 textos de 40 caracteres y sin marcado en los textos libres.
+ * accesses/via/relations, values con como mucho 16 textos de 40 caracteres y sin marcado en los textos libres.
  */
 export function dbMapErrors(map: unknown, flow: unknown): string[] {
   const errors: string[] = [];
@@ -396,7 +379,7 @@ export function dbMapErrors(map: unknown, flow: unknown): string[] {
     checkNoMarkup(at(a, 'fn'), `${path}.fn`, errors);
     const values = at(a, 'values');
     if (isObj(values)) {
-      if (Object.keys(values).length > 8) errors.push(`${path}.values: mas de 8 claves`);
+      if (Object.keys(values).length > DB_MAX_VALUES) errors.push(`${path}.values: mas de ${DB_MAX_VALUES} claves`);
       for (const [k, v] of Object.entries(values)) {
         const key = `${path}.values.${cut(k, 64)}`;
         if (typeof v !== 'string' || v.length > 40) errors.push(`${key}: debe ser un texto de como mucho 40 caracteres`);
@@ -409,23 +392,7 @@ export function dbMapErrors(map: unknown, flow: unknown): string[] {
 
 /* -------------------------------- UI_PLAN -------------------------------- */
 
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** Cada token .clase o #id del selector debe aparecer en algún HTML recibido (componente o hijos). */
-function checkSelector(value: unknown, path: string, htmlTexts: string[], errors: string[]): void {
-  if (typeof value !== 'string') return;
-  for (const m of value.matchAll(SELECTOR_TOKEN)) {
-    const word = new RegExp(`(?<![A-Za-z0-9_-])${escapeRegExp(m[2])}(?![A-Za-z0-9_-])`);
-    if (!htmlTexts.some((html) => word.test(html))) {
-      errors.push(`${path}: selector inexistente ${m[1]}${m[2]}`);
-      return;
-    }
-  }
-}
-
-function uiPlanBodyErrors(body: unknown, path: string, htmlTexts: string[], errors: string[]): void {
+function uiPlanBodyErrors(body: unknown, path: string, errors: string[]): void {
   const mark = at(body, 'mark');
   const inject = at(body, 'inject');
   checkNoMarkup(at(body, 'root'), `${path}.root`, errors);
@@ -443,22 +410,31 @@ function uiPlanBodyErrors(body: unknown, path: string, htmlTexts: string[], erro
   }
   const inputs = at(inject, 'inputs');
   if (isObj(inputs) && Object.keys(inputs).length > 20) errors.push(`${path}.inject.inputs: mas de 20 claves`);
-  checkSelector(at(body, 'root'), `${path}.root`, htmlTexts, errors);
-  checkSelector(at(mark, 'selector'), `${path}.mark.selector`, htmlTexts, errors);
-  checkSelector(at(inject, 'after'), `${path}.inject.after`, htmlTexts, errors);
 }
 
-/** Reglas del UiPreviewPlan que el esquema no expresa: sin marcado, tamaños de bindings/inputs y selectores existentes. */
-export function uiPlanErrors(plan: unknown, htmlTexts: string[]): string[] {
+/** Neutraliza '<' (por '‹') en caption y mark.label del plan, en la raíz y en `after`. */
+export function repairUiPlan(plan: Obj): void {
+  const fix = (body: unknown): void => {
+    if (!isObj(body)) return;
+    if (typeof body['caption'] === 'string') body['caption'] = defang(body['caption']);
+    const mark = body['mark'];
+    if (isObj(mark) && typeof mark['label'] === 'string') mark['label'] = defang(mark['label']);
+  };
+  fix(plan);
+  fix(plan['after']);
+}
+
+/** Reglas del UiPreviewPlan que el esquema no expresa: sin marcado en selectores, root e inject, y tamaños de bindings/inputs. */
+export function uiPlanErrors(plan: unknown): string[] {
   const errors: string[] = [];
   if (!isObj(plan)) return ['$: debe ser un objeto'];
-  uiPlanBodyErrors(plan, '$', htmlTexts, errors);
+  uiPlanBodyErrors(plan, '$', errors);
   const after = plan['after'];
   if (!isNullish(after)) {
     if (!isObj(after)) errors.push('$.after: debe ser un objeto');
     else {
       if ('after' in after) errors.push('$.after.after: no permitido');
-      uiPlanBodyErrors(after, '$.after', htmlTexts, errors);
+      uiPlanBodyErrors(after, '$.after', errors);
     }
   }
   return limit(errors);

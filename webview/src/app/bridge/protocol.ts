@@ -74,7 +74,8 @@ export type WebviewToHost =
   | { type: 'cancel'; id: string }
   | { type: 'openRef'; fileId: string; line: number; sample?: SampleDocument }
   | { type: 'notify'; level: NotifyLevel; text: string }
-  | { type: 'ask'; text: string };
+  | { type: 'ask'; text: string }
+  | { type: 'saveDbMap'; flowId: string; dbMap: unknown };
 
 export type HostToWebview =
   | { type: 'init' | 'config'; language: NexoLanguage; modelName: string | null; theme: NexoTheme }

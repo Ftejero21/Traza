@@ -17,7 +17,7 @@ import {
   SnippetView,
 } from '../ai/nexo-ia.types';
 import { functionLabel, isDecoratorFunctionName, refSymbolLabel } from '../ai/workspace-code-flow-ref-validator';
-import { FlowStatusPill, SavedResultPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
+import { FlowDbView, FlowStatusPill, SavedResultPill, WorkspaceCodeAiFlowService } from '../services/workspace-code-ai-flow.service';
 import { UiScreenView, UiViewportId, WorkspaceCodeAiUiPreviewService } from '../services/workspace-code-ai-ui-preview.service';
 import { WorkspaceCodeNotifyService } from '../services/workspace-code-notify.service';
 import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
@@ -65,6 +65,23 @@ const LANE_ICONS: Record<FlowLaneKind, string> = {
  * Pestaña «Flujo · <título>» de Nexo IA: diagrama de secuencia animado con tres modos (Recorrido, Simular datos y
  * Analizar logs) y el validador inferior. Copia de chatFront adaptada a la extensión (portapapeles por el host). El estado vive en `WorkspaceCodeAiFlowService`; aquí solo se pinta.
  */
+/** Acceso a datos ya alcanzado por el flujo (tarjeta del «rastro» del modo Base de datos). */
+export interface DbTrailItem {
+  /** Posición en el guion de datos. */
+  k: number;
+  /** Índice del paso en el flujo. */
+  flowIndex: number;
+  access: FlowDbAccess;
+  columns: { column: string; value: string | null }[];
+  current: boolean;
+}
+
+/** Columnas que intervienen en una tabla, unión de todos sus accesos alcanzados. */
+export interface DbTableColumns {
+  table: string;
+  columns: { name: string; ops: string }[];
+}
+
 @Component({
   selector: 'app-workspace-code-ai-flow',
   templateUrl: './workspace-code-ai-flow.component.html',
@@ -289,6 +306,69 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
   get dbFlowIndex(): number {
     return Math.max(0, this.flowService.dbView?.indexes.indexOf(this.step) ?? 0);
   }
+
+  /**
+   * Modo «Base de datos»: se ven todos los accesos (y las columnas del diagrama) cuando no se reproduce y el flujo llegó al
+   * final o el usuario navegó a mano; si no, solo los alcanzados hasta el paso actual.
+   */
+  get dbRevealAll(): boolean {
+    const p = this.flowService.player;
+    return !p.playing && (p.atEnd || p.lastChange === 'manual');
+  }
+
+  private dbReached(view: FlowDbView): number {
+    return this.dbRevealAll ? view.script.steps.length - 1 : this.dbFlowIndex;
+  }
+
+  private dbTrailCache: { view: FlowDbView; reached: number; current: number; list: DbTrailItem[] } | null = null;
+  private dbTablesCache: { view: FlowDbView; reached: number; list: DbTableColumns[] } | null = null;
+
+  /** Modo «Base de datos»: accesos alcanzados hasta ahora, en orden (cacheado por vista y paso alcanzado). */
+  get dbTrail(): DbTrailItem[] {
+    const view = this.flowService.dbView;
+    if (!view || this.flowService.ui.mode !== 'db') return [];
+    const reached = this.dbReached(view);
+    const current = this.dbFlowIndex;
+    const cache = this.dbTrailCache;
+    if (cache && cache.view === view && cache.reached === reached && cache.current === current) return cache.list;
+    const list: DbTrailItem[] = [];
+    for (let k = 0; k <= reached && k < view.indexes.length; k++) {
+      const access = this.flowService.dbAccess(view.indexes[k]);
+      if (!access) continue;
+      list.push({ k, flowIndex: view.indexes[k], access, columns: this.accessColumns(access), current: k === current });
+    }
+    this.dbTrailCache = { view, reached, current, list };
+    return list;
+  }
+
+  /** Modo «Base de datos»: por tabla, la unión de las columnas de todos sus accesos alcanzados. */
+  get dbTableColumns(): DbTableColumns[] {
+    const view = this.flowService.dbView;
+    if (!view || this.flowService.ui.mode !== 'db') return [];
+    const reached = this.dbReached(view);
+    const cache = this.dbTablesCache;
+    if (cache && cache.view === view && cache.reached === reached) return cache.list;
+    const byTable = new Map<string, Map<string, Set<string>>>();
+    const trail = this.dbTrail;
+    for (const item of trail) {
+      const cols = byTable.get(item.access.table) ?? new Map<string, Set<string>>();
+      for (const { column } of item.columns) {
+        const ops = cols.get(column) ?? new Set<string>();
+        ops.add(item.access.op);
+        cols.set(column, ops);
+      }
+      byTable.set(item.access.table, cols);
+    }
+    const list: DbTableColumns[] = [...byTable.entries()].map(([table, cols]) => ({
+      table,
+      columns: [...cols.entries()].map(([name, ops]) => ({ name, ops: [...ops].join(', ') })),
+    })).filter((t) => t.columns.length);
+    this.dbTablesCache = { view, reached, list };
+    return list;
+  }
+
+  trackTrail = (_: number, item: DbTrailItem) => item.k;
+  trackTableColumns = (_: number, item: DbTableColumns) => item.table;
 
   /** Cargador del código del método para el popover de la píldora del diagrama (referencia estable). */
   readonly dbFnCodeLoader = (i: number): Promise<SnippetView | null> => this.flowService.dbFnSnippet(i);
@@ -553,11 +633,40 @@ export class WorkspaceCodeAiFlowComponent implements OnInit, AfterViewInit, OnDe
     this.cdr.markForCheck();
   }
 
-  /** «Visualizar pantalla» (menú del paso ancla o botón de la tarjeta). */
-  visualize(event: Event): void {
+  /**
+   * «Visualizar pantalla» (menú del paso, indicador del número, detalle del paso o botón de la tarjeta). En el Recorrido
+   * `index` es el paso visible cuya pantalla se previsualiza.
+   */
+  visualize(event: Event, index?: number): void {
     event.stopPropagation();
     this.closeStepMenu();
+    if (this.flowService.ui.mode === 'walk' && index !== undefined) {
+      this.flowService.setWalkScreenStep(index);
+      // El contexto debe estar en la vista previa antes de abrirla.
+      this.syncPreview();
+    }
     this.preview.show();
+  }
+
+  /** Recorrido: el usuario final ve algo en este paso (indicador y «Visualizar pantalla»). */
+  screenStep(index: number): boolean {
+    return this.previewEnabled && this.flowService.ui.mode === 'walk' && this.flowService.isScreenStep(index);
+  }
+
+  /** Recorrido: el paso muestra lo que pide la pregunta. */
+  screenFocus(index: number): boolean {
+    return this.flowService.isFocusScreenStep(index);
+  }
+
+  /** Recorrido: lo que ve el usuario en el paso (`ui.what`), si el flujo lo trae. */
+  screenWhat(index: number): string | null {
+    return this.flow?.steps[index]?.ui?.what || null;
+  }
+
+  /** El popup está abierto para la pantalla de este paso del Recorrido. */
+  previewShowsStep(index: number): boolean {
+    const ctx = this.preview.ctx;
+    return this.preview.open && !!ctx && ctx.mode === 'walk' && ctx.anchor === index;
   }
 
   askStep(index: number): void {

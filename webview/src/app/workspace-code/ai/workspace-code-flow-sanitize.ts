@@ -18,6 +18,7 @@ import {
   FlowScenario,
   FlowStep,
   FlowStepKind,
+  FlowStepUiKind,
   LogAnalysisResult,
   LogEvidence,
   LogTone,
@@ -36,6 +37,7 @@ import {
 
 const LANE_KINDS: readonly FlowLaneKind[] = ['ui', 'component', 'service', 'api', 'db', 'queue', 'external', 'other'];
 const STEP_KINDS: readonly FlowStepKind[] = ['code', 'sql', 'http', 'event', 'generated'];
+const UI_KINDS: readonly FlowStepUiKind[] = ['screen', 'toast', 'list', 'warning', 'modal', 'error', 'message'];
 const RESULT_KINDS: readonly ResultKind[] = ['error', 'stop', 'ok', 'none'];
 const CONFIDENCE: readonly Confidence[] = ['alta', 'media', 'baja'];
 const TONES: readonly LogTone[] = ['info', 'error', 'trace'];
@@ -144,6 +146,10 @@ function sanitizeStep(raw: unknown, lanes: Set<string>, keepLocal: boolean): Flo
     ref: sanitizeCodeRef(o['ref'], keepLocal),
     snippet: sanitizeSnippet(o['snippet'], keepLocal),
   };
+  const ui = obj(o['ui']);
+  const uiKind = ui ? oneOf(ui['kind'], UI_KINDS) : null;
+  const uiWhat = ui ? str(ui['what'], 120).trim() : '';
+  if (ui && uiKind && uiWhat) step.ui = { kind: uiKind, what: uiWhat, ...(ui['focus'] === true ? { focus: true } : {}) };
   const generated = obj(o['generatedCode']);
   if (generated && typeof generated['code'] === 'string') {
     step.generatedCode = {
@@ -221,7 +227,7 @@ export function sanitizeFlowDiagram(raw: unknown, keepLocal = false): FlowDiagra
       id,
       label: str(p['label'], 28).trim() || id.slice(0, 28),
       input: p['input'],
-      expected: { kind: (kind === 'error' || kind === 'stop') && !failStepId ? 'none' : kind, failStepId: kind === 'ok' || kind === 'none' ? null : failStepId },
+      expected: { kind, failStepId: kind === 'ok' || kind === 'none' ? null : failStepId },
     };
     const status = expected ? int(expected['httpStatus'], 100) : null;
     if (status !== null) preset.expected.httpStatus = status;
@@ -385,10 +391,9 @@ export function sanitizeUiPreviewPlan(raw: unknown): UiPreviewPlan | null {
 }
 
 function sanitizeBase(o: Obj, stepIds: Set<string>): FlowDiagnosis {
-  let kind = oneOf(o['kind'], RESULT_KINDS) ?? 'none';
+  const kind = oneOf(o['kind'], RESULT_KINDS) ?? 'none';
   let failStepId = typeof o['failStepId'] === 'string' && stepIds.has(o['failStepId']) ? o['failStepId'] : null;
-  // Un error/stop sin paso válido se trata como «none»; ok/none nunca llevan paso.
-  if ((kind === 'error' || kind === 'stop') && !failStepId) kind = 'none';
+  // El paso que falla solo se conserva si es un paso del flujo; ok/none nunca llevan paso. El `kind` no se degrada.
   if (kind === 'ok' || kind === 'none') failStepId = null;
   const d: FlowDiagnosis = {
     kind,
@@ -450,11 +455,11 @@ export function sanitizeDiagnosis(raw: unknown, flow: FlowDiagram, kind: 'sim' |
 const DB_OPS: readonly FlowDbOp[] = ['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'UPSERT'];
 const DB_DIRECTIONS: readonly FlowDbAccess['direction'][] = ['toDb', 'fromDb'];
 const DB_MAX_TABLES = 8;
-const DB_MAX_COLUMNS = 16;
+const DB_MAX_COLUMNS = 24;
 const DB_MAX_RELATIONS = 12;
 const DB_MAX_ACCESSES = 20;
-const DB_MAX_ACCESS_COLUMNS = 8;
-const DB_MAX_VALUES = 8;
+const DB_MAX_ACCESS_COLUMNS = 16;
+const DB_MAX_VALUES = 16;
 const DB_MAX_VALUE_CHARS = 40;
 const DB_MAX_ERRORS = 20;
 
@@ -469,6 +474,11 @@ function dbName(value: unknown): string {
   return text && text.length <= 64 ? text : '';
 }
 
+/** Nombre de columna sin mayúsculas ni separadores (fechaCreacion ≡ fecha_creacion). */
+function dbNorm(value: string): string {
+  return value.replace(/[_\-\s]/g, '').toLowerCase();
+}
+
 /**
  * `FlowDbMap` saneado (respuesta de la IA, nunca confiable): trunca a los límites del esquema y descarta tablas sin
  * columnas, relaciones con tablas o columnas desconocidas, accesos con un paso inexistente, tabla desconocida o paso
@@ -479,6 +489,7 @@ export function sanitizeFlowDbMap(raw: unknown, flow: FlowDiagram): FlowDbMap | 
   if (!o) return null;
   const tables: FlowDbTable[] = [];
   const columnsOf = new Map<string, Set<string>>();
+  const tableOf = new Map<string, FlowDbTable>();
   for (const item of arr(o['tables'])) {
     if (tables.length >= DB_MAX_TABLES) break;
     const t = obj(item);
@@ -499,8 +510,29 @@ export function sanitizeFlowDbMap(raw: unknown, flow: FlowDiagram): FlowDbMap | 
     if (!columns.length) continue;
     columnsOf.set(name, seen);
     const entity = str(t['entity'], 80).trim();
-    tables.push({ name, entity: entity || null, columns });
+    const table: FlowDbTable = { name, entity: entity || null, columns };
+    tables.push(table);
+    tableOf.set(name, table);
   }
+
+  /**
+   * Resuelve una columna citada por un acceso contra la tabla (sin distinguir mayúsculas ni `_`); si no existe y la tabla
+   * tiene sitio, la añade (la IA a veces cita columnas que no declara en `tables`). `null` si no cabe.
+   */
+  const resolveColumn = (tableName: string, raw: unknown): string | null => {
+    const table = tableOf.get(tableName);
+    const cols = columnsOf.get(tableName);
+    const name = dbName(raw);
+    if (!table || !cols || !name) return null;
+    if (cols.has(name)) return name;
+    const key = dbNorm(name);
+    const found = table.columns.find((c) => dbNorm(c.name) === key);
+    if (found) return found.name;
+    if (!key || table.columns.length >= DB_MAX_COLUMNS) return null;
+    table.columns.push({ name, type: '', pk: false });
+    cols.add(name);
+    return name;
+  };
 
   const relations: FlowDbRelation[] = [];
   for (const item of arr(o['relations'])) {
@@ -529,7 +561,7 @@ export function sanitizeFlowDbMap(raw: unknown, flow: FlowDiagram): FlowDbMap | 
     const cols = columnsOf.get(table);
     if (!stepIds.has(stepId) || usedSteps.has(stepId) || !cols || !op || !direction) continue;
     usedSteps.add(stepId);
-    const columns = [...new Set(arr(a['columns']).filter((c): c is string => typeof c === 'string' && cols.has(c.trim())).map((c) => c.trim()))]
+    const columns = [...new Set(arr(a['columns']).map((c) => resolveColumn(table, c)).filter((c): c is string => !!c))]
       .slice(0, DB_MAX_ACCESS_COLUMNS);
     const access: FlowDbAccess = { stepId, table, op, direction, columns, fn: plainText(a['fn'], 80) };
     const values = obj(a['values']);
@@ -538,8 +570,10 @@ export function sanitizeFlowDbMap(raw: unknown, flow: FlowDiagram): FlowDbMap | 
       let n = 0;
       for (const [key, value] of Object.entries(values)) {
         if (n >= DB_MAX_VALUES) break;
-        if (!cols.has(key) || typeof value !== 'string' || value.includes('<')) continue;
-        out[key] = value.length > DB_MAX_VALUE_CHARS ? value.slice(0, DB_MAX_VALUE_CHARS) : value;
+        if (typeof value !== 'string' || value.includes('<')) continue;
+        const column = resolveColumn(table, key);
+        if (!column || column in out) continue;
+        out[column] = value.length > DB_MAX_VALUE_CHARS ? value.slice(0, DB_MAX_VALUE_CHARS) : value;
         n++;
       }
       if (n) access.values = out;

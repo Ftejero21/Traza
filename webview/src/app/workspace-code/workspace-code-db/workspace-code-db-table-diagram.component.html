@@ -82,7 +82,7 @@
         <div class="wtd-node__fns" *ngIf="n.fns.length" [style.height.px]="n.fnH" [title]="n.fns.join(', ')">
           <code class="wtd-node__fn" *ngFor="let f of n.fns">{{ f }}</code>
         </div>
-        <div *ngFor="let c of n.rows; trackBy: trackColumn" class="wtd-row" [style.height.px]="rowHeight" [class.is-linked]="n.linked.has(c.name)" [class.is-hot]="isHot(n, c.name)" [class.is-xfill]="!!xValueOf(n, c.name)" [class.is-xtouch]="xTouched(n, c.name)">
+        <div *ngFor="let c of n.rows; trackBy: trackColumn" class="wtd-row" [style.height.px]="rowHeight" [class.is-linked]="n.linked.has(c.name)" [class.is-hot]="isHot(n, c.name)" [class.is-xfill]="!!xValueOf(n, c.name)" [class.is-xtouch]="xTouched(n, c.name)" [class.is-xseen]="xSeen(n, c.name)">
           <i class="bi wtd-row__icon" [ngClass]="c.primaryKey ? 'bi-key-fill is-pk' : isFk(n, c) ? 'bi-link-45deg is-fk' : 'bi-dot'"></i>
           <span class="wtd-row__name" [title]="rowTitle(n, c)">{{ c.name }}</span>
           <span class="wtd-row__val" *ngIf="xValueOf(n, c.name) as v" [title]="v">{{ v }}</span>
@@ -148,7 +148,7 @@
       <p class="wdx-notice" role="note" *ngIf="fc.status === 'empty'"><i class="bi bi-info-circle"></i><span>{{ 'dbw.fnCode.empty' | wcT }}</span></p>
     </aside>
 
-    <!-- Modo «Explicar»: capa de pantalla (tamaño constante, no escala con el zoom). -->
+    <!-- Modo «Explicar»: capa de pantalla; en modo esquema el globo del paso escala con el zoom (ancho de una tabla). -->
     <ng-container *ngIf="explain as ex">
       <div class="wtd-xhead" [class.is-driven]="ex.driven">
         <strong class="wtd-xhead__title" *ngIf="!ex.driven"><i class="bi bi-magic"></i>{{ 'dbw.explain.title' | wcT: { table: ex.table } }}</strong>
@@ -160,7 +160,7 @@
 
       <ng-container *ngIf="ex.player.step as st">
         <ng-container *ngFor="let k of [ex.player.stepKey]">
-          <div class="wtd-xballoon" #xballoon *ngIf="xBalloon as b" [ngStyle]="b.style" [ngClass]="'is-' + b.placement" role="status" aria-live="polite">
+          <div class="wtd-xballoon" #xballoon *ngIf="xBalloon as b" [class.is-scaled]="schemaMode" [ngStyle]="b.style" [ngClass]="'is-' + b.placement" role="status" aria-live="polite">
             <span class="wtd-xballoon__num">{{ ex.player.index + 1 }}</span>
             <div class="wtd-xballoon__body">
               <span class="wtd-xballoon__meta" *ngIf="st.op || st.fn">

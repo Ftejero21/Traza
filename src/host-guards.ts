@@ -84,6 +84,8 @@ const LANGUAGES = new Set<NexoLanguage>(['es', 'en']);
 const LEVELS = new Set<NotifyLevel>(['info', 'success', 'warning', 'danger']);
 const READ_AS = new Set(['text', 'base64']);
 const MAX_ID = 128;
+const MAX_DB_MAP_CHARS = 300_000;
+const FLOW_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 
 export type GuardedMessage =
   | { type: 'ready' }
@@ -91,7 +93,8 @@ export type GuardedMessage =
   | { type: 'cancel'; id: string }
   | { type: 'openRef'; fileId: string; line: number; sample?: SampleDocument }
   | { type: 'notify'; level: NotifyLevel; text: string }
-  | { type: 'ask'; text: string };
+  | { type: 'ask'; text: string }
+  | { type: 'saveDbMap'; flowId: string; dbMap: Record<string, unknown> };
 
 function languageOf(value: unknown): NexoLanguage | null {
   return typeof value === 'string' && LANGUAGES.has(value as NexoLanguage) ? (value as NexoLanguage) : null;
@@ -223,6 +226,18 @@ export function guardMessage(raw: unknown): GuardedMessage | null {
     }
     case 'ask':
       return str(o['text'], MAX_ASK_CHARS) && (o['text'] as string).trim() ? { type: 'ask', text: o['text'] as string } : null;
+    case 'saveDbMap': {
+      const flowId = o['flowId'];
+      const dbMap = obj(o['dbMap']);
+      if (typeof flowId !== 'string' || !FLOW_ID.test(flowId) || !dbMap) return null;
+      let size: number;
+      try {
+        size = JSON.stringify(dbMap).length;
+      } catch {
+        return null;
+      }
+      return size <= MAX_DB_MAP_CHARS ? { type: 'saveDbMap', flowId, dbMap } : null;
+    }
     default:
       return null;
   }

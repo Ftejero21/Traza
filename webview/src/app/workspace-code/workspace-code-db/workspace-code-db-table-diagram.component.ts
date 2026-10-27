@@ -49,11 +49,6 @@ const EXPLAIN_PAD_TOP = 70;
 const EXPLAIN_PAD_BOTTOM = 96;
 /** Conducida por el flujo: cabecera compacta y sin barra de controles propia. */
 const DRIVEN_PAD_TOP = 92;
-/** Ancho mínimo útil del globo al colocarlo al lado de la tabla destino. */
-const DRIVEN_BALLOON_MIN_W = 200;
-/** Rango de escala del globo en modo esquema (relativa al zoom del último encuadre). */
-const BALLOON_SCALE_MIN = 0.7;
-const BALLOON_SCALE_MAX = 1.6;
 const DRIVEN_PAD_BOTTOM = 16;
 /** Altura de la fila de funciones (chips `fn`) de una tarjeta en modo esquema. */
 const FN_H = 20;
@@ -229,6 +224,8 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   @Input() flowScript: DbExplainScript | null = null;
   @Input() flowIndex = 0;
   @Input() flowSpeed = 1;
+  /** Modo conducido: acumula hasta el último paso del guion (fin de la reproducción o navegación manual). */
+  @Input() flowRevealAll = false;
   /** Busca el código del método de la píldora del paso `scriptIndex` (modo conducido). Sin él, la píldora no es un botón. */
   @Input() fnCodeLoader: ((scriptIndex: number) => Promise<SnippetView | null>) | null = null;
   /** El usuario pide abrir en el editor el fragmento del método mostrado en el popover. */
@@ -349,13 +346,12 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
   private actorCache: { key: string; list: XActor[] } | null = null;
   /** Alto medido del globo del paso actual y escala con que se midió (solo crece dentro de un mismo paso y escala). */
   private balloonMeasure: { key: string; h: number; s: number } | null = null;
-  /** Zoom del último encuadre (`fit` o `fitInvolved`): referencia de la escala del globo en modo esquema. */
-  private balloonBaseZ = 1;
   private balloonObserver: ResizeObserver | null = null;
   private balloonEl: HTMLElement | null = null;
   private schemaBalloonCache: { key: string; balloon: XBalloon } | null = null;
   private filledCache: { script: DbExplainScript | null; index: number; set: Set<string> } = { script: null, index: -1, set: new Set() };
   private valuesCache: { script: DbExplainScript | null; index: number; map: Map<string, string> } = { script: null, index: -1, map: new Map() };
+  private seenCache: { script: DbExplainScript | null; upto: number; set: Set<string> } = { script: null, upto: -2, set: new Set() };
   private partsCache = new Map<string, { t: string; code: boolean }[]>();
 
   constructor(
@@ -383,6 +379,11 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
       this.closeFnCode(false);
       this.dropExplain();
       this.rebuild();
+    }
+    if ('flowRevealAll' in changes) {
+      this.valuesCache = { script: null, index: -1, map: new Map() };
+      this.seenCache = { script: null, upto: -2, set: new Set() };
+      this.cdr.markForCheck();
     }
     if (!structural && ('flowScript' in changes || 'flowIndex' in changes)) this.closeFnCode(false);
     // El guion conducido sigue al reproductor del flujo sin reconstruir el diagrama.
@@ -894,7 +895,6 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
     const x = bw * z <= w - 2 * FIT_PAD ? (w - bw * z) / 2 - b.minX * z : FIT_PAD - b.minX * z;
     const y = bh * z <= h - 2 * FIT_PAD ? (h - bh * z) / 2 - b.minY * z : FIT_PAD - b.minY * z;
     this.view = { x, y, z };
-    this.balloonBaseZ = z;
     this.fitted = true;
     this.userAdjusted = false;
     this.schedule();
@@ -1295,21 +1295,50 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
     return !!ex?.driven && !!step && step.table === node.name && step.columns.includes(column);
   }
 
+  /** Último paso del guion hasta el que se acumula (modo conducido): el actual o, con `flowRevealAll`, el último. */
+  private xUpto(ex: ExplainState): number {
+    return ex.driven && this.flowRevealAll ? ex.script.steps.length - 1 : ex.player.index;
+  }
+
   /** Valores del flujo acumulados por `${tabla}.${columna}` hasta el paso actual (modo conducido). */
   private get xDrivenValues(): Map<string, string> {
     const ex = this.explain;
     if (!ex) return this.valuesCache.map;
     const cache = this.valuesCache;
-    if (cache.script !== ex.script || cache.index !== ex.player.index) {
+    const upto = this.xUpto(ex);
+    if (cache.script !== ex.script || cache.index !== upto) {
       const map = new Map<string, string>();
-      for (let i = 0; i <= ex.player.index; i++) {
+      for (let i = 0; i <= upto; i++) {
         const step = ex.script.steps[i];
         if (!step?.table || !step.values) continue;
         for (const [column, value] of Object.entries(step.values)) map.set(`${step.table}.${column}`, value);
       }
-      this.valuesCache = { script: ex.script, index: ex.player.index, map };
+      this.valuesCache = { script: ex.script, index: upto, map };
     }
     return this.valuesCache.map;
+  }
+
+  /** Columnas ya alcanzadas por el flujo (`${tabla}.${columna}`) hasta el paso actual, o todas con `flowRevealAll`. */
+  private get xSeenSet(): Set<string> {
+    const ex = this.explain;
+    if (!ex?.driven) return this.seenCache.set;
+    const upto = this.xUpto(ex);
+    const cache = this.seenCache;
+    if (cache.script !== ex.script || cache.upto !== upto) {
+      const set = new Set<string>();
+      for (let i = 0; i <= upto; i++) {
+        const step = ex.script.steps[i];
+        if (!step?.table) continue;
+        for (const column of step.columns) set.add(`${step.table}.${column}`);
+      }
+      this.seenCache = { script: ex.script, upto, set };
+    }
+    return this.seenCache.set;
+  }
+
+  /** Columna ya tocada en el diagrama por algún paso alcanzado (resaltado suave acumulativo). */
+  xSeen(node: TdNode, column: string): boolean {
+    return !!this.explain?.driven && this.xSeenSet.has(`${node.name}.${column}`);
   }
 
   xEdgeInvolved(edge: TdEdge): boolean {
@@ -1493,17 +1522,19 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
     const maxY = Math.max(...rects.map((r) => r.y + r.h));
     const bw = Math.max(1, maxX - minX);
     const bh = Math.max(1, maxY - minY);
-    const padTop = ex.driven ? DRIVEN_PAD_TOP : EXPLAIN_PAD_TOP;
+    // Las tablas empiezan por debajo de la cabecera «Datos de …» para que no las tape.
+    const head = this.host.nativeElement.querySelector<HTMLElement>('.wtd-xhead');
+    const headBottom = head ? head.getBoundingClientRect().bottom - el.getBoundingClientRect().top + 12 : 0;
+    const padTop = Math.max(ex.driven ? DRIVEN_PAD_TOP : EXPLAIN_PAD_TOP, headBottom);
     const padBottom = ex.driven ? DRIVEN_PAD_BOTTOM : EXPLAIN_PAD_BOTTOM;
-    // Conducida: se deja hueco a la derecha para que el globo vaya al lado de la tabla y no encima.
-    const reserve = (ex.driven || this.schemaMode) && w >= 2 * DRIVEN_BALLOON_MIN_W + 120 ? Math.min(BALLOON_W, Math.round(w * 0.42)) + BALLOON_GAP : 0;
-    const availW = Math.max(80, w - 2 * EXPLAIN_PAD_X - reserve);
+    // Conducida o en modo esquema: se deja hueco (en unidades del mundo) para que el globo, del ancho de una tabla, vaya a su lado.
+    const extra = ex.driven || this.schemaMode ? NODE_W + BALLOON_GAP : 0;
+    const availW = Math.max(80, w - 2 * EXPLAIN_PAD_X);
     const availH = Math.max(80, h - padTop - padBottom);
-    const z = Math.min(Math.max(Math.min(availW / bw, availH / bh, 1), MIN_ZOOM), MAX_ZOOM);
-    const x = EXPLAIN_PAD_X + (availW - bw * z) / 2 - minX * z;
+    const z = Math.min(Math.max(Math.min(availW / (bw + extra), availH / bh, 1), MIN_ZOOM), MAX_ZOOM);
+    const x = EXPLAIN_PAD_X + (availW - (bw + extra) * z) / 2 - minX * z;
     const y = padTop + Math.max(0, (availH - bh * z) / 2) - minY * z;
     this.view = { x, y, z };
-    this.balloonBaseZ = z;
     this.fitted = true;
     this.userAdjusted = true;
     this.schedule();
@@ -1639,12 +1670,10 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
     return { v: above(r), rect: r };
   }
 
-  /** Escala del globo: en modo esquema sigue al zoom relativo al último encuadre; fuera de él, siempre 1. */
+  /** Escala del globo: en modo esquema sigue al zoom absoluto (igual que las tablas); fuera de él, siempre 1. */
   private balloonScale(): number {
     if (!this.schemaMode || !this.explain) return 1;
-    const base = this.balloonBaseZ > 0 ? this.balloonBaseZ : 1;
-    const raw = Math.min(Math.max(this.view.z / base, BALLOON_SCALE_MIN), BALLOON_SCALE_MAX);
-    return Math.round(raw * 100) / 100;
+    return Math.round(Math.min(Math.max(this.view.z, MIN_ZOOM), MAX_ZOOM) * 100) / 100;
   }
 
   /** Globo del paso actual en coordenadas de pantalla (en modo esquema escala con el zoom relativo al encuadre), con la cola hacia su ancla. */
@@ -1748,8 +1777,8 @@ export class WorkspaceCodeDbTableDiagramComponent implements OnChanges, AfterVie
     const PAD = 6;
     const s = this.balloonScale();
     const gap = BALLOON_GAP * s;
-    const minW = DRIVEN_BALLOON_MIN_W * s;
-    const pw = Math.min(BALLOON_W * s, Math.max(120, cw - 16));
+    const minW = NODE_W * s * 0.85;
+    const pw = Math.min(NODE_W * s, Math.max(120, cw - 16));
     const h = this.balloonHeight(ex, s);
     const { x: vx, y: vy, z } = this.view;
     const toScreen = (r: Rect): Rect => ({ x: vx + r.x * z, y: vy + r.y * z, w: r.w * z, h: r.h * z });

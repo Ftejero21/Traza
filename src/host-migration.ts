@@ -8,7 +8,7 @@ import { trazaLog } from './host-ai';
  * Los ajustes de ámbito WorkspaceFolder no se migran: todos son de ámbito window.
  */
 
-const KEYS = ['model', 'language', 'databases', 'theme', 'copilotInstructions'] as const;
+const KEYS = ['model', 'language', 'databases', 'theme'] as const;
 type Key = (typeof KEYS)[number];
 
 const GLOBAL_FLAG = 'traza.legacyMigrated';
@@ -19,7 +19,6 @@ function validated(key: Key, value: unknown): unknown {
     case 'model': return value && typeof value === 'object' && !Array.isArray(value) ? value : undefined;
     case 'language': return value === 'es' || value === 'en' ? value : undefined;
     case 'databases': return Array.isArray(value) ? value : undefined;
-    case 'copilotInstructions': return typeof value === 'boolean' ? value : undefined;
     case 'theme': return value === 'vscode' ? 'vscode' : value === 'nexo' || value === 'traza' ? 'traza' : undefined;
   }
 }

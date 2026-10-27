@@ -5,7 +5,6 @@ import { runChangeRequest } from './host-change';
 import { registerChatParticipant } from './host-chat';
 import { registerDbCommands } from './host-db';
 import { migrateLegacySettings } from './host-migration';
-import { registerFlowTool } from './host-tool';
 import { registerFlowUriHandler } from './host-uri';
 
 const MAX_JSON_BYTES = 2 * 1024 * 1024;
@@ -202,7 +201,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('traza.showFlow', (arg?: unknown) => showFlow(context, ai, arg)),
     ...registerChatParticipant(context, ai),
-    ...registerFlowTool(context, ai),
     registerFlowUriHandler(context, ai),
     ...registerDbCommands(context, () => FlowPanel.clearDbCache()),
   );

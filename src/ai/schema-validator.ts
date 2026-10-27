@@ -3,6 +3,7 @@
  * Subconjunto usado por `nexo-ia.schemas.json` (único origen del contrato; importado en el bundle): type (también en
  * array y null), required, properties, additionalProperties false, enum, minLength/maxLength, minimum/maximum,
  * minItems/maxItems, items, $ref a #/$defs, oneOf, allOf y el esquema vacío {}. Como mucho 20 errores con ruta.
+ * `clampToSchema` aplica el recorte mecánico previo (longitudes, rangos, listas, claves desconocidas).
  */
 import SCHEMAS from './nexo-ia.schemas.json';
 
@@ -192,4 +193,74 @@ export function validate(definition: string, value: unknown): string[] {
   if (!schema) return [`$: esquema desconocido ${definition}`];
   check(schema, value, '$', errors, 0);
   return errors;
+}
+
+function branchType(branch: unknown): unknown {
+  if (!isObj(branch)) return undefined;
+  if (branch['type'] !== undefined) return branch['type'];
+  const ref = branch['$ref'];
+  const target = typeof ref === 'string' ? resolve(ref) : null;
+  return target ? target['type'] : undefined;
+}
+
+function clampNode(schema: unknown, node: Json, path: string, keep: ReadonlySet<string>, depth: number): Json {
+  if (!isObj(schema) || !Object.keys(schema).length || depth > MAX_DEPTH) return node;
+  let value = node;
+  const ref = schema['$ref'];
+  if (typeof ref === 'string') {
+    const target = resolve(ref);
+    if (target) value = clampNode(target, value, path, keep, depth + 1);
+  }
+  const allOf = schema['allOf'];
+  if (Array.isArray(allOf)) for (const sub of allOf) value = clampNode(sub, value, path, keep, depth + 1);
+  const oneOf = schema['oneOf'];
+  if (Array.isArray(oneOf)) {
+    const candidates = oneOf.filter((sub) => {
+      const type = branchType(sub);
+      return type !== undefined && matchesType(type, value);
+    });
+    if (candidates.length === 1) value = clampNode(candidates[0], value, path, keep, depth + 1);
+  }
+  if (typeof value === 'string') {
+    const max = schema['maxLength'];
+    if (typeof max === 'number' && codePoints(value) > max) value = Array.from(value).slice(0, max).join('');
+  } else if (typeof value === 'number' && Number.isFinite(value)) {
+    const min = schema['minimum'];
+    const max = schema['maximum'];
+    let num: number = value;
+    if (typeof min === 'number' && num < min) num = min;
+    if (typeof max === 'number' && num > max) num = max;
+    value = num;
+  } else if (Array.isArray(value)) {
+    const max = schema['maxItems'];
+    let arr: Json[] = value;
+    if (typeof max === 'number' && arr.length > max && !keep.has(path)) arr = arr.slice(0, max);
+    const items = schema['items'];
+    if (isObj(items)) arr = arr.map((item, i) => clampNode(items, item, `${path}[${i}]`, keep, depth + 1));
+    value = arr;
+  } else if (isObj(value)) {
+    const properties = isObj(schema['properties']) ? (schema['properties'] as Record<string, unknown>) : null;
+    const obj: Record<string, unknown> = value;
+    if (properties && schema['additionalProperties'] === false) {
+      for (const key of Object.keys(obj)) if (!Object.prototype.hasOwnProperty.call(properties, key)) delete obj[key];
+    }
+    if (properties) {
+      for (const [key, sub] of Object.entries(properties)) {
+        if (Object.prototype.hasOwnProperty.call(obj, key)) obj[key] = clampNode(sub, obj[key], `${path}.${key}`, keep, depth + 1);
+      }
+    }
+  }
+  return value;
+}
+
+/**
+ * Recorte mecánico previo a `validate` (modifica el valor en sitio): strings por encima de `maxLength`, números fuera de
+ * `minimum`/`maximum`, arrays por encima de `maxItems` (salvo las rutas de `keepArrays`) y propiedades desconocidas
+ * con `additionalProperties:false`. Misma resolución de `$ref`/`allOf`/`oneOf` y mismas rutas que `check`; en `oneOf`
+ * solo se recorta si exactamente una rama coincide con el tipo del valor.
+ */
+export function clampToSchema(definition: string, value: unknown, keepArrays: ReadonlySet<string> = new Set()): void {
+  const schema = definitionNode(definition);
+  if (!schema) return;
+  clampNode(schema, value, '$', keepArrays, 0);
 }

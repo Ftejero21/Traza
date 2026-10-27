@@ -55,6 +55,18 @@ export interface FlowLane {
 
 export type FlowStepKind = 'code' | 'sql' | 'http' | 'event' | 'generated';
 
+/** Qué ve el usuario final en un paso: vista o pantalla, toast, lista de datos, aviso, modal, mensaje de error… */
+export type FlowStepUiKind = 'screen' | 'toast' | 'list' | 'warning' | 'modal' | 'error' | 'message';
+
+/** Lo que el paso muestra al usuario final en pantalla (opcional: los flujos antiguos no lo traen). */
+export interface FlowStepUi {
+  kind: FlowStepUiKind;
+  /** Qué ve exactamente (texto o elemento), ≤120. */
+  what: string;
+  /** El paso muestra lo que pide la pregunta. */
+  focus?: boolean;
+}
+
 export interface FlowStep {
   id: string;
   /** Id de carril origen y destino. Iguales = llamada interna (bucle). */
@@ -70,6 +82,8 @@ export interface FlowStep {
   ref: CodeRef | null;
   /** Fragmento a mostrar. Para sql/http/generated, `generatedCode` sustituye a la lectura del archivo. */
   snippet: CodeSnippet | null;
+  /** Solo en pasos que el usuario final ve en pantalla. */
+  ui?: FlowStepUi;
   generatedCode?: { title: string; language: string; code: string; highlightIndex: number };
   /**
    * Código mostrado cuando la validación pudo leer el archivo (≤ 8 líneas de ≤ 400 caracteres). Solo frontend: se
@@ -253,7 +267,7 @@ export interface UiPlanContext {
   children: { selector: string; name: string; html: UiPlanFile; css: UiPlanFile[] }[];
   globalCss: string;
   simulation: {
-    mode: 'sim' | 'logs' | 'changes';
+    mode: 'sim' | 'logs' | 'changes' | 'walk';
     step: { index: number; id: string; title: string; label: string };
     kind: ResultKind;
     badge: string;

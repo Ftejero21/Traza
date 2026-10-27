@@ -101,20 +101,9 @@ A la izquierda, el diff del cambio propuesto. A la derecha, **Simular cambios** 
 - `@traza /cambio valida que el email no esté vacío`: propone un cambio sobre el flujo abierto y lo lleva a **Simular cambios**.
 - Los archivos que adjuntes con `#archivo` se usan como pista prioritaria.
 
-### En modo agente: `#trazaFlujo`
+### Solo con @traza
 
-En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pago?») y el agente llamará a Traza por su cuenta, o nómbralo con `#trazaFlujo`. VS Code pide confirmación (ahora también muestra la carpeta elegida), se abre el panel y el agente recibe los pasos en texto para su respuesta. La herramienta no modifica archivos.
-
-- Se elige sola ante preguntas de escenario («¿qué pasa si…?», «what happens if…?»: contraseña incorrecta, sin sesión, sin permiso, registro inexistente…). El panel se abre en **Simular datos** con el escenario reproducido.
-- La respuesta del agente termina con un enlace **Visualizar flujo** (`vscode://ftejero21.traza/show?id=…`) que se puede pulsar; VS Code puede pedir permiso para abrir la URI la primera vez.
-- En un workspace con varias carpetas, el agente puede pasar `project` (o nombrarla en la pregunta) para limitar el análisis a esa carpeta.
-
-### Copilot sin @traza
-
-- Traza contribuye instrucciones a Copilot Chat para las preguntas sobre flujos y procesos del proyecto.
-- En sesiones «Local» (modo Agent) Copilot puede llamar a `#trazaFlujo` aunque no escribas `@traza`.
-- En otras sesiones (p. ej. Copilot CLI, donde las tools de extensiones pueden no estar disponibles) Copilot puede terminar la respuesta con un enlace «Visualizar flujo» (`vscode://ftejero21.traza/flow?q=…`) que genera el flujo tras pedir confirmación.
-- Lo decide el modelo, así que no está garantizado al 100 %. Se desactiva con `traza.copilotInstructions: false`; en versiones de VS Code sin `chatInstructions` no se aplica.
+Traza solo actúa cuando escribes `@traza` (o con sus comandos o enlaces). Sin `@traza`, Copilot responde con normalidad y no invoca a Traza.
 
 ### Desde un enlace
 
@@ -156,16 +145,16 @@ En el modo agente de Copilot, pregunta por un proceso («¿cómo funciona el pag
 
 Traza es el nuevo nombre de la extensión «Nexo Flujo» (id `ftejero21.traza`).
 
-- Los ajustes `nexo.*` (`model`, `language`, `databases`, `theme`, `copilotInstructions`) se copian solos a `traza.*` la primera vez que se activa Traza, sin sobrescribir los `traza.*` que ya tengas. Los `nexo.*` antiguos no se borran.
+- Los ajustes `nexo.*` (`model`, `language`, `databases`, `theme`) se copian solos a `traza.*` la primera vez que se activa Traza, sin sobrescribir los `traza.*` que ya tengas. Los `nexo.*` antiguos no se borran.
 - Las contraseñas de base de datos no se migran (el almacén seguro está aislado por extensión): vuelve a guardarlas con **Traza: Contraseña de base de datos**.
-- `@nexo` pasa a `@traza` y `#nexoFlujo` a `#trazaFlujo`.
+- `@nexo` pasa a `@traza`.
 - Los enlaces `vscode://nexo-local.nexo-vscode/…` dejan de funcionar; usa `vscode://ftejero21.traza/…`.
 
 ---
 
 ## Requisitos
 
-- **VS Code 1.95 o superior.** Traza se publica como **Preview**. El modo agente requiere una versión de VS Code y de Copilot con herramientas de agente.
+- **VS Code 1.95 o superior.** Traza se publica como **Preview**.
 - **Un modelo de lenguaje en VS Code** (p. ej. GitHub Copilot) con Claude, GPT o BYOK. Se guarda en el ajuste `traza.model`; si está vacío, se elige al usarlo.
 - **Una carpeta del proyecto abierta.**
 
@@ -186,7 +175,6 @@ En cada operación, el código relevante se envía **al proveedor del modelo que
 Además:
 
 - Los secretos de configuración, tokens, contraseñas y emails se enmascaran como `«oculto»`.
-- `#trazaFlujo` pide confirmación antes de enviar nada.
 - El canal **Traza** del panel Output solo guarda diagnóstico (validaciones y modelos), nunca código, prompts ni respuestas.
 
 ## Consumo

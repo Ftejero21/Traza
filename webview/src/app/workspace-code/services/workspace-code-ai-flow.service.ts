@@ -149,7 +149,7 @@ class ChangeContextError extends Error {
 export interface UiScreenContext {
   /** Identidad: el resultado en simular/logs; el caso en Simular cambios. */
   key: object;
-  mode: 'sim' | 'logs' | 'changes';
+  mode: 'sim' | 'logs' | 'changes' | 'walk';
   flowId: string;
   /** Índice del paso ancla (fallo, último o último visto). */
   anchor: number;
@@ -252,6 +252,11 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   changeLookup: ((flowId: string) => { messageId: string; proposal: ChangeProposal } | null) | null = null;
   /** Modo «Base de datos»: esquema y guion listos para pintar. */
   dbView: FlowDbView | null = null;
+  /** Paso del Recorrido cuya pantalla se previsualiza (-1 = ninguno). */
+  private walkScreenStep = -1;
+  private walkScreenCtx: { flowId: string; index: number; ctx: UiScreenContext } | null = null;
+  /** Pasos visibles de cada flujo (se calcula una vez por objeto de flujo). */
+  private screenSteps = new WeakMap<FlowDiagram, Set<number>>();
 
   /** Resultado de cada modo guardado al cambiar de pestaña (solo en memoria; se vacía en `open()`). */
   private savedViews: { sim?: SavedDiagnosisView; logs?: SavedDiagnosisView } = {};
@@ -276,6 +281,10 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Mapa de datos: petición propia, caché en memoria (`flowId|language|nexo`). */
   private dbRunId = 0;
   private dbCancel: ((escape?: boolean) => void) | null = null;
+  /** Carga del mapa en curso (también en segundo plano); solo una a la vez. */
+  private dbInFlight: { flowId: string; runId: number } | null = null;
+  /** Secuencia de la presentación de un mapa ya conocido (no invalida las cargas). */
+  private dbShowId = 0;
   private readonly dbCache = new Map<string, FlowDbMapStored>();
   /** Metadata de las conexiones de base de datos configuradas (se limpia en «Regenerar»). */
   private readonly dbMetaCache = new Map<string, WorkspaceCodeDatabaseMetadata>();
@@ -305,7 +314,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
    * Abre un flujo: revalida las referencias contra el código actual. Devuelve `false` si el JSON no es un flujo
    * válido (`sanitizeFlowDiagram`).
    */
-  async open(input: unknown, step = 0, mode: FlowMode = 'walk'): Promise<boolean> {
+  async open(input: unknown, step = 0, mode: FlowMode = 'walk', opts: { prefetchDb?: boolean } = {}): Promise<boolean> {
     // Flujos ya validados: conserva la verificación y el código guardado (`codeSnapshot`).
     const sanitized = sanitizeFlowDiagram(input, true);
     if (!sanitized) return false;
@@ -317,21 +326,23 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       this.cancelCompare();
       this.autoCompareFailed.clear();
     }
-    // Mapa de datos: se cancela la carga al cambiar de flujo o de modo; con el mismo flujo se conservan la vista y la caché.
-    if (!sameFlow || mode !== 'db') this.stopDbRequest();
+    // Mapa de datos: se cancela la carga solo al cambiar de flujo; con el mismo flujo se conservan la vista, la caché y la carga en curso.
+    if (!sameFlow) this.stopDbRequest();
     if (sameFlow && !sanitized.dbMap && this.flow?.dbMap) sanitized.dbMap = this.flow.dbMap;
     this.flow = sanitized;
     if (!sameFlow) {
       this.snippets = new Map();
       this.fileIds = new Map();
       this.dbView = null;
+      this.walkScreenStep = -1;
+      this.walkScreenCtx = null;
     }
     const keep = sameFlow ? this.ui : null;
     this.ui = {
       ...emptyUi(),
       speed: this.player.speed,
       mode: (mode === 'changes' && !this.activeChangeFor(sanitized.id)) || (mode === 'db' && !flowHasDb(sanitized)) ? 'walk' : mode,
-      dbStatus: keep && keep.dbStatus !== 'loading' ? keep.dbStatus : 'idle',
+      dbStatus: keep && (keep.dbStatus !== 'loading' || this.dbInFlight?.flowId === sanitized.id) ? keep.dbStatus : 'idle',
       dbError: keep?.dbError ?? null,
       dbErrorAction: keep?.dbErrorAction ?? null,
       simInput: this.json(sanitized.inputExample),
@@ -350,6 +361,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.player.select(step);
     this.emit();
     if (this.ui.mode === 'db') void this.loadDbMap();
+    else if (opts.prefetchDb) this.prefetchDbMap();
     // Revalidación (el código puede haber cambiado desde que se generó el flujo).
     await this.revalidate();
     return true;
@@ -360,8 +372,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
    * resultado reproducido (validado como cualquier diagnóstico). Sin escenario, abre el recorrido normal.
    */
   async openScenario(input: FlowDiagram, source: FlowResultSource): Promise<boolean> {
-    if (!input.scenario) return this.open(input, 0, 'walk');
-    const ok = await this.open(input, 0, 'sim');
+    if (!input.scenario) return this.open(input, 0, 'walk', { prefetchDb: true });
+    const ok = await this.open(input, 0, 'sim', { prefetchDb: true });
     const flow = this.flow;
     // Otra apertura o una acción del usuario durante la revalidación tiene prioridad.
     if (!ok || !flow || flow.id !== input.id || !flow.scenario || this.ui.mode !== 'sim' || this.ui.busy || this.ui.simResult) return ok;
@@ -414,14 +426,89 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.player.select(index);
   }
 
+  /* ---------------------------- pasos visibles (Recorrido) ---------------------------- */
+
+  /**
+   * El usuario final ve algo en este paso (vista, toast, lista, aviso, modal, mensaje de error). Usa `step.ui`; en flujos
+   * antiguos, sin `ui` en ningún paso, se deduce del carril `ui` o de una referencia a una plantilla .html.
+   */
+  isScreenStep(index: number): boolean {
+    const flow = this.flow;
+    if (!flow || index < 0 || index >= flow.steps.length) return false;
+    let set = this.screenSteps.get(flow);
+    if (!set) {
+      set = new Set<number>();
+      if (flow.steps.some((s) => !!s.ui)) {
+        flow.steps.forEach((s, i) => { if (s.ui) set!.add(i); });
+      } else {
+        const uiLanes = new Set(flow.lanes.filter((l) => l.kind === 'ui').map((l) => l.id));
+        flow.steps.forEach((s, i) => {
+          const file = s.ref?.file ?? s.snippet?.ref?.file ?? '';
+          if (uiLanes.has(s.to) || uiLanes.has(s.from) || /\.html?$/i.test(file)) set!.add(i);
+        });
+      }
+      this.screenSteps.set(flow, set);
+    }
+    return set.has(index);
+  }
+
+  /** El paso muestra lo que pide la pregunta. */
+  isFocusScreenStep(index: number): boolean {
+    return this.flow?.steps[index]?.ui?.focus === true;
+  }
+
+  /** Fija el paso del Recorrido cuya pantalla se va a previsualizar (si es visible) y notifica el cambio. */
+  setWalkScreenStep(index: number): void {
+    if (!this.isScreenStep(index) || this.walkScreenStep === index) return;
+    this.walkScreenStep = index;
+    this.emit();
+  }
+
+  private walkScreenContext(): UiScreenContext | null {
+    const flow = this.flow;
+    const index = this.walkScreenStep;
+    if (!flow || index < 0 || !this.isScreenStep(index)) return null;
+    const cached = this.walkScreenCtx;
+    if (cached && cached.flowId === flow.id && cached.index === index) return cached.ctx;
+    const step = flow.steps[index];
+    const kind = step.ui?.kind;
+    const before: SimulationResult = {
+      kind: 'ok',
+      failStepId: null,
+      badge: '',
+      title: step.title,
+      where: step.ref,
+      conclusion: step.explanation,
+      userImpact: step.ui?.what || step.explanation,
+      fix: '',
+      snippet: null,
+      confidence: 'media',
+      confidenceReason: '',
+      executedStepIds: flow.steps.slice(0, index + 1).map((s) => s.id),
+      skippedStepIds: [],
+    };
+    const ctx: UiScreenContext = {
+      key: before,
+      mode: 'walk',
+      flowId: flow.id,
+      anchor: index,
+      tone: kind === 'error' ? 'danger' : kind === 'warning' ? 'warning' : 'accent',
+      before,
+      afterResult: null,
+      proposal: null,
+      initialTab: 'now',
+      input: maskSensitiveJson(flow.inputExample),
+    };
+    this.walkScreenCtx = { flowId: flow.id, index, ctx };
+    return ctx;
+  }
+
   /* ---------------------------- modos y datos ---------------------------- */
 
   setMode(mode: FlowMode): void {
     if (this.ui.mode === mode) return;
     if (mode === 'changes' && !this.activeChange) return;
     if (mode === 'db' && !this.hasDb) return;
-    // Salir del modo «Base de datos» cancela la carga del mapa.
-    if (this.ui.mode === 'db') this.stopDbRequest();
     this.cancelSequence();
     // Cada modo conserva su resultado: se guarda su vista antes de limpiar los campos compartidos.
     const previous = this.ui.mode;
@@ -1162,10 +1249,10 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
         if (!validator.usable(file)) throw new ChangeContextError(this.i18n.t('aiChange.notAllowed'));
         const lines = await validator.linesOf(file);
         if (!lines) throw new ChangeContextError(this.i18n.t('aiChange.notAllowed'));
-        // Los bloques se vuelven a encajar contra el código actual (el backend exige `oldStart` exacto).
+        // Los bloques se vuelven a encajar contra el código actual (el backend exige `oldStart` exacto); si no encajan, se
+        // envían tal cual y el modelo razona el después con el código original y el diff.
         const applied = applyFileChange(lines.join('\n'), change);
-        if (!applied.ok) throw new ChangeContextError(this.i18n.t('aiChange.invalidDiff'));
-        hunks = applied.hunks;
+        if (applied.ok) hunks = applied.hunks;
         fileLines = lines;
       }
       targets.push({ file, change, path: target.path, hunks, lines: fileLines });
@@ -1392,7 +1479,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   screenContext(): UiScreenContext | null {
     const ui = this.ui;
     const flow = this.flow;
-    if (!flow || ui.mode === 'walk' || ui.mode === 'db' || !ui.resultVisible) return null;
+    if (flow && ui.mode === 'walk') return this.walkScreenContext();
+    if (!flow || ui.mode === 'db' || !ui.resultVisible) return null;
     const result = this.result;
     if (!result) return null;
     const anchor = this.targetOf(result, ui.mode === 'logs' ? 'logs' : 'sim');
@@ -1506,78 +1594,113 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   async loadDbMap(force = false): Promise<void> {
     const flow = this.flow;
     if (!flow || !this.hasDb) return;
-    this.stopDbRequest();
-    const runId = ++this.dbRunId;
-    if (force) this.dbMetaCache.clear();
-    const language = this.i18n.language === 'en' ? 'en' : 'es';
-    const cacheKey = `${flow.id}|${language}|nexo`;
-    const known = force ? null : flow.dbMap ?? this.dbCache.get(cacheKey) ?? null;
-    if (known) {
-      let conn: FlowDbConnection | null = null;
-      try {
-        conn = await this.dbConnectionFor(flow, await this.validator(), false);
-      } catch (error: unknown) {
-        console.warn('[Traza] No se pudo resolver la conexión del mapa de datos.', error instanceof Error ? error.name : '');
-      }
-      if (runId !== this.dbRunId || this.flow?.id !== flow.id) return;
-      this.presentDbMap(known, conn);
-      return;
+    if (force) {
+      this.stopDbRequest();
+      this.dbMetaCache.clear();
+      return this.fetchDbMap(flow, true);
     }
-
-    this.dbView = null;
-    this.player.setStops(null);
-    this.ui = { ...this.ui, dbStatus: 'loading', dbError: null, dbErrorAction: null, dbClaude: false };
-    this.emit();
-    let prepared: { contextBase64: string; conn: FlowDbConnection | null };
-    try {
-      prepared = await this.dbMapContext(flow, force);
-    } catch (error: unknown) {
-      if (runId !== this.dbRunId) return;
-      console.warn('[Traza] No se pudo preparar el contexto del mapa de datos.', error instanceof Error ? error.name : '');
-      this.dbFail(this.i18n.t('aiFlow.db.failed'));
-      return;
-    }
-    if (runId !== this.dbRunId) return;
-    const request = this.requestFlowResult('db-map', prepared.contextBase64, this.i18n.t('aiFlow.db.failed'));
-    this.dbCancel = (escape?: boolean) => request.cancel(escape);
-    const outcome = await request.promise;
-    if (runId !== this.dbRunId) return;
-    this.dbCancel = null;
-    if (outcome.status === 'cancelled') {
-      this.ui = { ...this.ui, dbStatus: 'idle', dbClaude: false };
+    // Carga en curso (p. ej. en segundo plano) para este flujo: se espera sin relanzar la petición.
+    if (this.dbInFlight?.flowId === flow.id) {
+      if (this.ui.dbStatus !== 'loading') this.ui = { ...this.ui, dbStatus: 'loading', dbError: null, dbErrorAction: null };
       this.emit();
       return;
     }
-    if (outcome.status === 'error') {
-      this.dbFail(outcome.message);
-      return;
+    const language = this.i18n.language === 'en' ? 'en' : 'es';
+    const cacheKey = `${flow.id}|${language}|nexo`;
+    const known = flow.dbMap ?? this.dbCache.get(cacheKey) ?? null;
+    if (!known) return this.fetchDbMap(flow, false);
+    const showId = ++this.dbShowId;
+    // El reproductor queda listo sin esperar a las conexiones.
+    if (this.dbView?.map === known && this.ui.mode === 'db') {
+      this.player.setStops(this.dbView.indexes.length ? this.dbView.indexes : null);
     }
-    const current = this.flow;
-    if (!current || current.id !== flow.id) return;
-    const map = sanitizeFlowDbMap(outcome.plan, current);
-    if (!map) {
-      this.dbFail(this.i18n.t('ai.error.schema'));
-      return;
+    let conn: FlowDbConnection | null = null;
+    try {
+      conn = await this.dbConnectionFor(flow, await this.validator(), false);
+    } catch (error: unknown) {
+      console.warn('[Traza] No se pudo resolver la conexión del mapa de datos.', error instanceof Error ? error.name : '');
     }
-    const stored: FlowDbMapStored = {
-      ...map,
-      source: outcome.source,
-      language,
-      generatedAt: new Date().toISOString(),
-      schema: prepared.conn ? 'real' : 'code',
-      database: prepared.conn?.meta.database ?? null,
-    };
-    this.flow = { ...current, dbMap: stored };
-    this.dbCache.delete(cacheKey);
-    this.dbCache.set(cacheKey, stored);
-    while (this.dbCache.size > DB_CACHE_LIMIT) this.dbCache.delete(this.dbCache.keys().next().value as string);
-    this.presentDbMap(stored, prepared.conn);
+    if (showId !== this.dbShowId || this.flow?.id !== flow.id) return;
+    this.presentDbMap(known, conn);
+  }
+
+  /** Precarga el mapa de datos en segundo plano al abrir un flujo (sin tocar el reproductor ni otros modos). */
+  prefetchDbMap(): void {
+    const flow = this.flow;
+    if (!flow || !this.hasDb) return;
+    if (this.project.sample && !this.bridge.isMock) return;
+    if (this.dbInFlight?.flowId === flow.id) return;
+    const language = this.i18n.language === 'en' ? 'en' : 'es';
+    if (flow.dbMap || this.dbCache.get(`${flow.id}|${language}|nexo`)) return;
+    void this.fetchDbMap(flow, false);
+  }
+
+  private async fetchDbMap(flow: FlowDiagram, force: boolean): Promise<void> {
+    const runId = ++this.dbRunId;
+    this.dbInFlight = { flowId: flow.id, runId };
+    try {
+      const language = this.i18n.language === 'en' ? 'en' : 'es';
+      const cacheKey = `${flow.id}|${language}|nexo`;
+      this.dbView = null;
+      if (this.ui.mode === 'db') this.player.setStops(null);
+      this.ui = { ...this.ui, dbStatus: 'loading', dbError: null, dbErrorAction: null, dbClaude: false };
+      this.emit();
+      let prepared: { contextBase64: string; conn: FlowDbConnection | null };
+      try {
+        prepared = await this.dbMapContext(flow, force);
+      } catch (error: unknown) {
+        if (runId !== this.dbRunId) return;
+        console.warn('[Traza] No se pudo preparar el contexto del mapa de datos.', error instanceof Error ? error.name : '');
+        this.dbFail(this.i18n.t('aiFlow.db.failed'));
+        return;
+      }
+      if (runId !== this.dbRunId) return;
+      const request = this.requestFlowResult('db-map', prepared.contextBase64, this.i18n.t('aiFlow.db.failed'));
+      this.dbCancel = (escape?: boolean) => request.cancel(escape);
+      const outcome = await request.promise;
+      if (runId !== this.dbRunId) return;
+      this.dbCancel = null;
+      if (outcome.status === 'cancelled') {
+        this.ui = { ...this.ui, dbStatus: 'idle', dbClaude: false };
+        this.emit();
+        return;
+      }
+      if (outcome.status === 'error') {
+        this.dbFail(outcome.message);
+        return;
+      }
+      const current = this.flow;
+      if (!current || current.id !== flow.id) return;
+      const map = sanitizeFlowDbMap(outcome.plan, current);
+      if (!map) {
+        this.dbFail(this.i18n.t('ai.error.schema'));
+        return;
+      }
+      const stored: FlowDbMapStored = {
+        ...map,
+        source: outcome.source,
+        language,
+        generatedAt: new Date().toISOString(),
+        schema: prepared.conn ? 'real' : 'code',
+        database: prepared.conn?.meta.database ?? null,
+      };
+      this.flow = { ...current, dbMap: stored };
+      this.dbCache.delete(cacheKey);
+      this.dbCache.set(cacheKey, stored);
+      while (this.dbCache.size > DB_CACHE_LIMIT) this.dbCache.delete(this.dbCache.keys().next().value as string);
+      if (!this.project.sample) this.bridge.post({ type: 'saveDbMap', flowId: current.id, dbMap: stored });
+      this.presentDbMap(stored, prepared.conn);
+    } finally {
+      if (this.dbInFlight?.runId === runId) this.dbInFlight = null;
+    }
   }
 
   /** Botón «Cancelar» de la carga. */
   cancelDbMap(): void {
     const cancel = this.dbCancel;
     this.dbCancel = null;
+    this.dbInFlight = null;
+    this.dbShowId++;
     this.dbRunId++;
     cancel?.(true);
     if (this.ui.dbStatus === 'loading') this.ui = { ...this.ui, dbStatus: this.dbView ? 'ready' : 'idle', dbClaude: false };
@@ -1587,6 +1710,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Deja de esperar el mapa de datos (cambio de modo o de flujo). */
   private stopDbRequest(): void {
     this.dbRunId++;
+    this.dbShowId++;
+    this.dbInFlight = null;
     const cancel = this.dbCancel;
     this.dbCancel = null;
     cancel?.(false);

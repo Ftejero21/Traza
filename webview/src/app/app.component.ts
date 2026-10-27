@@ -80,12 +80,14 @@ export class AppComponent implements OnInit, OnDestroy {
         // Flujo recién generado por la IA con escenario: se abre en «Simular» con el resultado reproducido.
         const scenario = !msg.sample && !!msg.source && !msg.mode && !!flow && typeof flow === 'object' && !Array.isArray(flow)
           && !!(flow as { scenario?: unknown }).scenario;
+        // Flujo generado por la IA: el mapa de datos se precarga en segundo plano.
+        const prefetchDb = !msg.sample && !!msg.source;
         if (msg.mode === 'changes') {
           // Petición de cambio: las propuestas se cargan antes de abrir para entrar directo en «Simular cambios»
           // (sin pasar por «Recorrido») y la comparación antes/después se lanza sola.
           const candidate = sanitizeFlowDiagram(flow, true);
           if (candidate) await this.changes.load(proposals, candidate, false);
-          const opened = await this.flowService.open(flow, step, 'changes');
+          const opened = await this.flowService.open(flow, step, 'changes', { prefetchDb });
           if (!opened) {
             this.notify.show('El JSON no es un flujo válido', 'danger');
             return;
@@ -96,7 +98,7 @@ export class AppComponent implements OnInit, OnDestroy {
         }
         const ok = scenario && msg.source
           ? await this.flowService.openScenario(flow as FlowDiagram, { provider: 'lm', model: msg.source.model })
-          : await this.flowService.open(flow, step, mode);
+          : await this.flowService.open(flow, step, mode, { prefetchDb });
         if (!ok) {
           this.notify.show('El JSON no es un flujo válido', 'danger');
           return;

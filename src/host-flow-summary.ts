@@ -1,7 +1,7 @@
 /**
- * Resumen de un flujo generado, compartido por la herramienta del modo agente (`traza_flow`) y por `@traza`:
- * detección de escenario («¿qué pasa si…?»), elección de carpeta del workspace y formateo del texto (plano para el
- * modelo, markdown escapado para el chat). Todo texto que viene de la IA se recorta y, en el chat, se escapa.
+ * Resumen de un flujo generado, usado por `@traza`:
+ * detección de escenario («¿qué pasa si…?»), elección de carpeta del workspace y formateo del markdown escapado
+ * para el chat. Todo texto que viene de la IA se recorta y, en el chat, se escapa.
  */
 import * as vscode from 'vscode';
 import type { GeneratedFlow } from './host-ai';
@@ -9,7 +9,6 @@ import type { ChangeRunResult } from './host-change';
 import { foldAccents } from './host-context';
 import { normalizeCodePath } from './host-guards';
 
-const MAX_STEPS = 40;
 const MAX_SUMMARY = 600;
 const MAX_ERRORS = 400;
 const MAX_LABEL = 120;
@@ -185,58 +184,6 @@ function stepLines(flow: Record<string, unknown>, max: number, esc: (s: string) 
 
 /* ------------------------------ textos ------------------------------ */
 
-const identity = (s: string): string => s;
-
-export function flowLinkTitle(): string {
-  return isSpanish() ? 'Visualizar flujo' : 'Visualize flow';
-}
-
-function scenarioLines(info: ScenarioInfo, es: boolean): string[] {
-  const badge = info.badge ? ` · ${info.badge}` : '';
-  const lines = [`${es ? 'Escenario' : 'Scenario'}: ${info.label}${badge}`];
-  if (info.userImpact) lines.push(`${es ? 'Qué ve el usuario' : 'What the user sees'}: ${info.userImpact}`);
-  if (info.kind === 'error' || info.kind === 'stop') {
-    const head = info.kind === 'error' ? (es ? 'Dónde falla' : 'Where it fails') : (es ? 'Dónde se detiene' : 'Where it stops');
-    const step = info.stepIndex ? `${es ? 'paso' : 'step'} ${info.stepIndex}` : '';
-    const label = info.stepLabel ? ` — ${info.stepLabel}` : '';
-    const place = whereText(info.where, identity);
-    lines.push(`${head}: ${step}${label}${place ? ` (${place})` : ''}`.replace(/:\s*$/, ''));
-  } else if (info.kind === 'ok') {
-    lines.push(es ? 'El flujo termina correctamente.' : 'The flow ends successfully.');
-  }
-  if (info.conclusion) lines.push(`${es ? 'Conclusión' : 'Conclusion'}: ${info.conclusion}`);
-  return lines;
-}
-
-/** Texto plano y acotado que recibe el agente, con la instrucción de terminar con el enlace «Visualizar flujo». */
-export function formatFlowToolText(generated: GeneratedFlow, showUri: string): string {
-  const es = isSpanish();
-  const flow = generated.flow;
-  const title = oneLine(generated.title, 120);
-  const lines: string[] = [
-    `${es ? 'Flujo' : 'Flow'}: ${title}`,
-    `${es ? 'Modelo' : 'Model'}: ${oneLine(generated.model, 120)}`,
-    `${es ? 'Resumen' : 'Summary'}: ${oneLine(flow['summary'], MAX_SUMMARY)}`,
-  ];
-  if (typeof flow['errorSummary'] === 'string') lines.push(`${es ? 'Errores' : 'Errors'}: ${oneLine(flow['errorSummary'], MAX_ERRORS)}`);
-  const info = scenarioInfo(generated);
-  if (info) lines.push(...scenarioLines(info, es));
-  else if (generated.scenarioAsked) {
-    lines.push(es ? 'Escenario: el modelo no devolvió un escenario simulable; revisa «Simular datos» en el panel.' : 'Scenario: the model did not return a simulable scenario; check "Simular datos" in the panel.');
-  }
-  const steps = stepLines(flow, MAX_STEPS, identity);
-  lines.push(es ? 'Pasos:' : 'Steps:', ...steps.lines);
-  if (steps.more > 0) lines.push(es ? `… y ${steps.more} pasos más` : `… and ${steps.more} more steps`);
-  const opened = info
-    ? (es ? 'abierto en «Simular datos» con el escenario' : 'opened in "Simular datos" with the scenario')
-    : (es ? 'abierto' : 'opened');
-  lines.push(es
-    ? `El diagrama interactivo ya está ${opened} en el panel «Flujo · ${title}» (Recorrido, Simular datos, Analizar logs, Base de datos, Simular cambios). No se ha modificado ningún archivo.`
-    : `The interactive diagram is already ${opened} in the panel "Flujo · ${title}" (Recorrido, Simular datos, Analizar logs, Base de datos, Simular cambios). No file has been modified.`);
-  lines.push(`End your answer with this exact markdown link on its own line, unchanged: [${flowLinkTitle()}](${showUri})`);
-  return lines.join('\n');
-}
-
 const MAX_CHAT_STEPS = 8;
 
 /** Markdown del chat de `@traza`: título, resumen, escenario y pasos; todo texto de la IA escapado. */
@@ -350,38 +297,4 @@ export function formatChangeChatMarkdown(r: ChangeRunResult): string {
     ? 'Abierto en «Simular cambios» (antes/después)\\. No se ha modificado ningún archivo\\.'
     : 'Opened in "Simular cambios" (before/after)\\. No file has been modified\\.');
   return parts.join('\n\n');
-}
-
-/** Texto plano y acotado para el agente tras una petición de cambio; `showUri` vacío = sin enlace. */
-export function formatChangeToolText(r: ChangeRunResult, showUri: string): string {
-  const es = isSpanish();
-  const flowTitle = oneLine(r.flowTitle, 120);
-  const flowLine = r.generated
-    ? `${es ? 'Flujo generado' : 'Generated flow'}: ${flowTitle}`
-    : `${es ? 'Sobre el flujo abierto' : 'On the open flow'}: ${flowTitle}`;
-  const lines: string[] = [];
-  if (r.kind === 'answer') {
-    lines.push(`${es ? 'Traza necesita una aclaración' : 'Traza needs a clarification'}: ${oneLine(r.answer, 1500)}`, flowLine);
-    if (r.generated) lines.push(es ? 'El flujo generado está abierto en el panel. No se ha modificado ningún archivo.' : 'The generated flow is open in the panel. No file has been modified.');
-    if (showUri) lines.push(`End your answer with this exact markdown link on its own line, unchanged: [${flowLinkTitle()}](${showUri})`);
-    return lines.join('\n');
-  }
-  const proposal = r.proposal;
-  lines.push(flowLine, `${es ? 'Modelo' : 'Model'}: ${oneLine(r.model, 120)}`);
-  lines.push(`${es ? 'Propuesta' : 'Proposal'}: ${oneLine(proposal['title'], 120)}`);
-  const summary = oneLine(proposal['summary'], MAX_SUMMARY);
-  if (summary) lines.push(`${es ? 'Resumen' : 'Summary'}: ${summary}`);
-  const files = changeFiles(proposal);
-  if (files.lines.length) {
-    lines.push(es ? 'Archivos:' : 'Files:', ...files.lines.map((f) => `- ${f.path}${f.status ? ` (${f.status})` : ''}`));
-    if (files.more > 0) lines.push(es ? `… y ${files.more} archivos más` : `… and ${files.more} more files`);
-  }
-  const risks = changeRisks(proposal);
-  if (risks.length) lines.push(es ? 'Riesgos:' : 'Risks:', ...risks.map((x) => `- ${x}`));
-  lines.push(es
-    ? 'La propuesta ya está abierta en «Simular cambios» (antes/después) del panel de Traza. No se ha modificado ningún archivo; el usuario la revisa y aplica desde ahí.'
-    : 'The proposal is already open in "Simular cambios" (before/after) in the Traza panel. No file has been modified; the user reviews and applies it from there.');
-  if (showUri) lines.push(`End your answer with this exact markdown link on its own line, unchanged: [${es ? 'Ver cambios' : 'View changes'}](${showUri})`);
-  else lines.push(es ? 'Está abierta en el panel de Traza.' : 'It is open in the Traza panel.');
-  return lines.join('\n');
 }

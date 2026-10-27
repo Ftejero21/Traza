@@ -22,6 +22,7 @@ const SQL_TABLE = /\b(?:FROM|INTO|UPDATE|JOIN)\s+[`"[]?([A-Za-z_][\w$]*)/gi;
 const MAX_DB_STEPS = 8;
 const MAX_ENTITIES = 4;
 const MAX_TEXT = 200;
+const MAX_VIRTUAL_COLUMNS = 24;
 
 const OP_ICONS: Record<string, string> = {
   SELECT: 'bi-search', INSERT: 'bi-box-seam', UPDATE: 'bi-pencil-square', DELETE: 'bi-trash3', UPSERT: 'bi-arrow-repeat',
@@ -84,6 +85,11 @@ export function candidateTableNames(texts: string[], entities: string[]): Set<st
   return out;
 }
 
+/** Nombre sin mayúsculas ni separadores (fechaCreacion ≡ fecha_creacion). */
+function normName(name: string): string {
+  return name.replace(/[_\-\s]/g, '').toLowerCase();
+}
+
 function virtualColumn(name: string, type: string, pk: boolean, nullable: boolean | undefined, position: number): WorkspaceCodeDbColumn {
   return {
     name, position, dataType: type, columnType: type, length: null, precision: null, scale: null,
@@ -136,7 +142,9 @@ export function buildFlowDbSchema(map: FlowDbMap, real: WorkspaceCodeDatabaseMet
     const t = tables.get(table);
     if (!t) return null;
     const lower = column.toLowerCase();
-    return t.columns.find((c) => c.name === column)?.name ?? t.columns.find((c) => c.name.toLowerCase() === lower)?.name ?? null;
+    const norm = normName(column);
+    return t.columns.find((c) => c.name === column)?.name ?? t.columns.find((c) => c.name.toLowerCase() === lower)?.name
+      ?? (norm ? t.columns.find((c) => normName(c.name) === norm)?.name : undefined) ?? null;
   };
 
   // Primera pasada: columnas (sin claves foráneas de las virtuales).
@@ -148,6 +156,18 @@ export function buildFlowDbSchema(map: FlowDbMap, real: WorkspaceCodeDatabaseMet
     }
     if (!source) continue;
     const columns = source.columns.map((c, i) => virtualColumn(c.name, c.type, c.pk, c.nullable, i + 1));
+    // Unión con las columnas de todos los accesos (leídas, escritas, filtradas y claves de `values`).
+    const known = new Set(columns.map((c) => normName(c.name)));
+    for (const access of map.accesses) {
+      if (canonical.get(access.table.toLowerCase()) !== source.name) continue;
+      for (const name of [...access.columns, ...Object.keys(access.values ?? {})]) {
+        const clean = name.trim();
+        const key = normName(clean);
+        if (!clean || !key || known.has(key) || columns.length >= MAX_VIRTUAL_COLUMNS) continue;
+        known.add(key);
+        columns.push(virtualColumn(clean, '', false, undefined, columns.length + 1));
+      }
+    }
     tables.set(source.name, {
       name: source.name, type: 'TABLE', engine: null, rowEstimate: null, comment: source.entity ?? null, columns,
       primaryKey: columns.filter((c) => c.primaryKey).map((c) => c.name), foreignKeys: [], indexes: [], referencedBy: [],

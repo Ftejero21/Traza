@@ -220,6 +220,14 @@ export class FlowPanel {
       case 'ask':
         void this.ask(message.text);
         return;
+      case 'saveDbMap': {
+        this.ai.rememberDbMap(message.flowId, message.dbMap);
+        const flow = this.payload.flow;
+        if (!this.payload.sample && flow && typeof flow === 'object' && !Array.isArray(flow) && (flow as { id?: unknown }).id === message.flowId) {
+          this.payload = { ...this.payload, flow: { ...(flow as Record<string, unknown>), dbMap: message.dbMap } };
+        }
+        return;
+      }
       default:
         return;
     }

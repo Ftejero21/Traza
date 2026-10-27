@@ -49,6 +49,10 @@
             <span class="wcf-num-hit" (mouseenter)="openStepMenu(i)" (mouseleave)="scheduleStepMenuClose()">
               <span class="wcf-num">{{ stepNumberText(i) }}</span>
               <span class="wcf-num-mark" *ngIf="savedFailMark(i) as m" [attr.data-tone]="m" aria-hidden="true"></span>
+              <button type="button" class="wcf-num-screen" *ngIf="screenStep(i)" [attr.data-focus]="screenFocus(i) || null"
+                [title]="(screenFocus(i) ? 'aiFlow.screen.badgeFocus' : 'aiFlow.screen.badge') | wcT"
+                [attr.aria-label]="(screenFocus(i) ? 'aiFlow.screen.badgeFocus' : 'aiFlow.screen.badge') | wcT"
+                (click)="visualize($event, i)"><i class="bi bi-display" aria-hidden="true"></i></button>
             </span>
             <!-- Menú de acciones del paso (se abre al pasar el ratón por el número) -->
             <div class="wcf-stepmenu" *ngIf="stepMenu === i" role="menu"
@@ -58,7 +62,7 @@
                 <span class="wcf-stepmenu__step">{{ 'aiFlow.stepMenu.step' | wcT: { n: i + 1 } }}</span>
                 <code class="wcf-stepmenu__label" [title]="s.label">{{ s.label }}</code>
               </div>
-              <button type="button" role="menuitem" class="wcf-stepmenu__item" *ngIf="previewEnabled && preview.screenStep === i" (click)="visualize($event)">
+              <button type="button" role="menuitem" class="wcf-stepmenu__item" *ngIf="previewEnabled && ((preview.screenStep === i && flowService.ui.mode !== 'walk') || screenStep(i))" (click)="visualize($event, i)">
                 <i class="bi bi-display" aria-hidden="true"></i>{{ 'aiFlow.stepMenu.visualize' | wcT }}
               </button>
               <button type="button" role="menuitem" class="wcf-stepmenu__item" (click)="$event.stopPropagation(); askStep(i)">
@@ -109,7 +113,7 @@
           <header class="wcf-uip__head">
             <i class="bi bi-display" aria-hidden="true"></i>
             <span class="wcf-uip__title">{{ 'aiFlow.preview.title' | wcT }}</span>
-            <span class="wcf-uip__chip">P{{ preview.screenStep + 1 }}</span>
+            <span class="wcf-uip__chip">P{{ (preview.screenStep >= 0 ? preview.screenStep : pv.anchor) + 1 }}</span>
             <div class="wcf-uip__tabs wcf-uip__vp" role="group" [attr.aria-label]="'aiFlow.screen.viewport' | wcT" *ngIf="preview.status === 'ready'">
               <button type="button" *ngFor="let vp of preview.viewports" [class.is-on]="preview.viewport === vp.id" [attr.aria-pressed]="preview.viewport === vp.id"
                 [disabled]="preview.viewportBusy" [title]="vp.key | wcT" [attr.aria-label]="vp.key | wcT" (click)="setViewport(vp.id)"><i class="bi" [ngClass]="vp.icon" aria-hidden="true"></i></button>
@@ -128,7 +132,7 @@
           </div>
           <div class="wcf-uip__loading" *ngIf="preview.status === 'loading' || preview.status === 'idle'" role="status">
             <span class="wce-dots" aria-hidden="true"><span class="wce-dot"></span><span class="wce-dot"></span><span class="wce-dot"></span></span>
-            <p class="wcf-uip__loading-title">{{ 'aiFlow.screen.loadingPrefix' | wcT }} <b>{{ preview.componentName }}</b></p>
+            <p class="wcf-uip__loading-title">{{ 'aiFlow.screen.loadingPrefix' | wcT }} <b>{{ preview.componentName || '…' }}</b></p>
             <p class="wcf-uip__loading-sub">{{ 'aiFlow.screen.loadingSub' | wcT }}</p>
           </div>
           <div class="wcf-uip__state is-error" *ngIf="preview.status === 'error'" role="alert">
@@ -158,7 +162,7 @@
 
     <!-- Base de datos: esquema de tablas del flujo, animado con el mismo reproductor -->
     <div class="wcf__diagram wcf__diagram--db" *ngIf="flowService.ui.mode === 'db'">
-      <div class="wcf-db__state" *ngIf="flowService.ui.dbStatus === 'loading'" role="status" aria-live="polite">
+      <div class="wcf-db__state" *ngIf="flowService.ui.dbStatus === 'loading' || flowService.ui.dbStatus === 'idle'" role="status" aria-live="polite">
         <span class="wcf-pulse" aria-hidden="true"><span></span><span></span><span></span></span>
         <p>{{ 'aiFlow.db.loading' | wcT }}</p>
       </div>
@@ -169,9 +173,9 @@
           <button type="button" class="wcf-btn" (click)="flowService.loadDbMap(true)"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>{{ 'ai.retry' | wcT }}</button>
         </div>
       </div>
-      <div class="wcf-db__state" *ngIf="flowService.ui.dbStatus === 'empty' || flowService.ui.dbStatus === 'idle'">
+      <div class="wcf-db__state" *ngIf="flowService.ui.dbStatus === 'empty'">
         <i class="bi bi-database" aria-hidden="true"></i>
-        <p *ngIf="flowService.ui.dbStatus === 'empty'">{{ 'aiFlow.db.empty' | wcT }}</p>
+        <p>{{ 'aiFlow.db.empty' | wcT }}</p>
         <button type="button" class="wcf-btn" (click)="flowService.loadDbMap(true)"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>{{ 'aiFlow.db.refresh' | wcT }}</button>
       </div>
       <ng-container *ngIf="flowService.ui.dbStatus === 'ready' && flowService.dbView as v">
@@ -181,7 +185,7 @@
         </div>
         <div class="wcf-db__diagram">
           <app-workspace-code-db-table-diagram [connectionKey]="v.connectionKey" [tableName]="v.script.table" [schema]="v.schema" [schemaKey]="v.schemaKey"
-            [flowScript]="v.script" [flowIndex]="dbFlowIndex" [flowSpeed]="flowService.player.speed"
+            [flowScript]="v.script" [flowIndex]="dbFlowIndex" [flowSpeed]="flowService.player.speed" [flowRevealAll]="dbRevealAll"
             [fnCodeLoader]="dbFnCodeLoader" (fnCodeOpen)="flowService.openSnippetView($event)"></app-workspace-code-db-table-diagram>
         </div>
       </ng-container>
@@ -205,6 +209,12 @@
           <dt>{{ 'aiFlow.file' | wcT }}</dt><dd class="wcf-table__file" [title]="r.file">{{ r.file }}:{{ r.line }}</dd>
         </dl>
         <p class="wcf-warn" *ngIf="c.ref?.verification === 'unverified'"><i class="bi bi-exclamation-triangle" aria-hidden="true"></i>{{ 'ai.flow.unverified' | wcT }}</p>
+        <div class="wcf-detail__screen" *ngIf="screenStep(step)" [attr.data-focus]="screenFocus(step) || null">
+          <p class="wcf-detail__see" *ngIf="screenWhat(step) as what"><i class="bi bi-display" aria-hidden="true"></i><span>{{ 'aiFlow.screen.what' | wcT }}: <b>{{ what }}</b></span></p>
+          <button type="button" class="wcf-btn wcf-uip-open" *ngIf="!previewShowsStep(step)" (click)="visualize($event, step)">
+            <i class="bi bi-display" aria-hidden="true"></i>{{ 'aiFlow.stepMenu.visualize' | wcT }}
+          </button>
+        </div>
         <ng-container *ngIf="flowService.ui.mode === 'db' && flowService.ui.dbStatus === 'ready'">
           <dl class="wcf-table wcf-db__access" *ngIf="currentAccess as acc; else noAccess">
             <dt>{{ 'aiFlow.db.table' | wcT }}</dt><dd class="wcf-table__class">{{ acc.table }}<ng-container *ngIf="acc.via"> ⋈ {{ acc.via }}</ng-container></dd>
@@ -223,6 +233,28 @@
           </dl>
           <p class="wcf-db__accnote" *ngIf="currentAccess?.note">{{ currentAccess?.note }}</p>
           <ng-template #noAccess><p class="wcf-db__none">{{ 'aiFlow.db.noAccess' | wcT }}</p></ng-template>
+          <section class="wcf-db__trail" *ngIf="dbTrail.length" [attr.aria-label]="'aiFlow.db.trail' | wcT">
+            <h4 class="wcf-db__subtitle"><i class="bi bi-diagram-3" aria-hidden="true"></i>{{ 'aiFlow.db.trail' | wcT }}</h4>
+            <button type="button" *ngFor="let item of dbTrail; trackBy: trackTrail" class="wcf-db__card" [class.is-current]="item.current"
+              [attr.aria-current]="item.current ? 'step' : null" (click)="flowService.selectStep(item.flowIndex)">
+              <span class="wcf-db__card-head">
+                <span class="wcf-db__card-step">P{{ item.flowIndex + 1 }}</span>
+                <span class="wcf-db__op" [attr.data-op]="item.access.op">{{ item.access.op }}</span>
+                <span class="wcf-db__card-table">{{ item.access.table }}<ng-container *ngIf="item.access.via"> ⋈ {{ item.access.via }}</ng-container></span>
+              </span>
+              <span class="wcf-db__cols" *ngIf="item.columns.length">
+                <code *ngFor="let col of item.columns">{{ col.column }}<ng-container *ngIf="col.value"> ← {{ col.value }}</ng-container></code>
+              </span>
+              <span class="wcf-db__card-fn wcf-table__fn" *ngIf="item.access.fn">{{ item.access.fn }}()</span>
+            </button>
+          </section>
+          <section class="wcf-db__tables" *ngIf="dbTableColumns.length" [attr.aria-label]="'aiFlow.db.tableColumns' | wcT">
+            <h4 class="wcf-db__subtitle"><i class="bi bi-table" aria-hidden="true"></i>{{ 'aiFlow.db.tableColumns' | wcT }}</h4>
+            <div class="wcf-db__table" *ngFor="let t of dbTableColumns; trackBy: trackTableColumns">
+              <span class="wcf-table__class">{{ t.table }}</span>
+              <span class="wcf-db__cols"><code *ngFor="let col of t.columns" [title]="col.ops">{{ col.name }}</code></span>
+            </div>
+          </section>
           <p class="wcf-card__source" *ngIf="flowService.dbView?.map?.source as src">
             <i class="bi bi-cpu" aria-hidden="true"></i>{{ ('aiFlow.source.db.' + src.provider) | wcT: { model: src.model ?? '' } }}
           </p>

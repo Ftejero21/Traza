@@ -93,23 +93,20 @@ export class WorkspaceCodeAiChangeService implements OnDestroy {
       }
       paths.add(target.path);
       const file = this.project.fileByPath(target.path) ?? null;
+      // Un archivo ilegible o un diff que no encaja no descartan la propuesta: se dibuja tal cual y Aplicar da conflicto.
       const original = file ? await this.readChangeFile(file) : null;
-      if (file && original === null) {
-        console.warn('[Traza] Propuesta de cambio sobre un archivo que no se puede leer: se omite.');
-        return null;
-      }
+      const baseHash = original === null ? null : await sha256Hex(original);
       const applied = applyFileChange(original, change);
-      if (!applied.ok) {
-        console.warn('[Traza] Propuesta de cambio cuyo diff no encaja con el archivo: se omite.');
-        return null;
+      if (applied.ok) {
+        files.push({ ...change, hunks: applied.hunks, additions: applied.additions, deletions: applied.deletions, baseHash });
+      } else {
+        console.info('[Traza] Diff que no encaja con el archivo actual: se muestra tal cual (no aplicable).');
+        files.push({
+          ...change,
+          hunks: change.hunks.map((h) => ({ ...h, lines: h.lines.map((l) => ({ ...l, oldLine: null, newLine: null })) })),
+          baseHash,
+        });
       }
-      files.push({
-        ...change,
-        hunks: applied.hunks,
-        additions: applied.additions,
-        deletions: applied.deletions,
-        baseHash: original === null ? null : await sha256Hex(original),
-      });
     }
     let id = proposal.id;
     if (loaded.some((p) => p.id === id)) {

@@ -1,5 +1,5 @@
 /**
- * Orquestador único de peticiones de cambio (chat `@traza`, comando «Proponer cambio», tool `traza_flow` y deep links):
+ * Orquestador único de peticiones de cambio (chat `@traza`, comando «Proponer cambio» y deep links):
  * reutiliza el flujo abierto si es relevante o genera uno nuevo, propone el cambio con `HostAi.proposeChange` y, cuando
  * la propuesta está lista, abre el panel directamente en «Simular cambios». Solo se simula: nunca escribe archivos.
  */

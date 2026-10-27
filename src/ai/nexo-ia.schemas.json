@@ -136,6 +136,14 @@
             "kind": { "enum": ["code", "sql", "http", "event", "generated"] },
             "ref": { "oneOf": [{ "$ref": "#/$defs/CodeRef" }, { "type": "null" }] },
             "snippet": { "$ref": "#/$defs/CodeSnippet" },
+            "ui": {
+              "type": "object", "additionalProperties": false, "required": ["kind", "what"],
+              "properties": {
+                "kind": { "enum": ["screen", "toast", "list", "warning", "modal", "error", "message"] },
+                "what": { "type": "string", "maxLength": 120 },
+                "focus": { "type": "boolean" }
+              }
+            },
             "generatedCode": {
               "type": "object", "additionalProperties": false,
               "required": ["title", "language", "code", "highlightIndex"],
@@ -156,7 +164,7 @@
       },
       "inputExample": {},
       "simulationPresets": {
-        "type": "array", "minItems": 3, "maxItems": 8,
+        "type": "array", "maxItems": 8,
         "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "label", "input", "expected"],
           "properties": {
@@ -213,7 +221,7 @@
             "name": { "type": "string", "minLength": 1, "maxLength": 64 },
             "entity": { "type": ["string", "null"], "maxLength": 80 },
             "columns": {
-              "type": "array", "minItems": 1, "maxItems": 16,
+              "type": "array", "minItems": 1, "maxItems": 24,
               "items": {
                 "type": "object", "additionalProperties": false, "required": ["name", "type", "pk"],
                 "properties": {
@@ -249,7 +257,7 @@
             "table": { "type": "string", "minLength": 1, "maxLength": 64 },
             "op": { "enum": ["SELECT", "INSERT", "UPDATE", "DELETE", "UPSERT"] },
             "direction": { "enum": ["toDb", "fromDb"] },
-            "columns": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+            "columns": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
             "values": { "type": "object" },
             "via": { "type": ["string", "null"], "maxLength": 64 },
             "fn": { "type": "string", "maxLength": 80 },
