@@ -16,6 +16,8 @@ export abstract class NexoBridge {
   abstract readonly isMock: boolean;
   /** Avisos que pinta la propia webview (solo en el modo navegador). */
   readonly toast$ = new Subject<BridgeToast>();
+  /** Progreso del host de una petición en curso (p. ej. «Leyendo X…»), por id de petición. */
+  readonly progress$ = new Subject<{ id: string; message: string }>();
 
   newId(): string {
     try {

@@ -1,5 +1,5 @@
 import { Injectable, OnDestroy } from '@angular/core';
-import { Subject } from 'rxjs';
+import { Subject, Subscription } from 'rxjs';
 import { NexoBridge } from '../../bridge/nexo-bridge';
 import { DbConnectionInfo, FlowDiagnosisResponse, FlowKind } from '../../bridge/protocol';
 import { NexoConfigService } from '../../project/nexo-config.service';
@@ -28,10 +28,11 @@ import { maskConfigSecrets, maskSensitiveJson } from '../ai/workspace-code-ai-ma
 import { FlowRefValidator, isDecoratorFunctionName, refKey } from '../ai/workspace-code-flow-ref-validator';
 import { WorkspaceCodeFlowPlayer } from '../ai/workspace-code-flow-player';
 import { sanitizeDiagnosis, sanitizeFlowDbMap, sanitizeFlowDiagram } from '../ai/workspace-code-flow-sanitize';
-import { buildFlowDbSchema, buildFlowDbScript, candidateTableNames, dbStepIndexes, flowHasDb, isDbStep, repositoryEntities } from '../ai/workspace-code-flow-db';
+import { buildFlowDbSchema, buildFlowDbScript, candidateTableNames, dbSourceSeeds, dbStepIndexes, flowHasDb, isDbStep, repositoryEntities } from '../ai/workspace-code-flow-db';
 import { DbExplainScript } from '../workspace-code-db/workspace-code-db-explain';
 import { shortType } from '../workspace-code-db/workspace-code-db.util';
 import { analyzeLogs } from '../ai/workspace-code-log-analyzer';
+import { VIEW_TEMPLATE_RE } from '../ai/workspace-code-ui-component';
 import { WorkspaceCodeNotifyService } from './workspace-code-notify.service';
 import { WorkspaceCodeDatabaseMetadata, WorkspaceCodeDbTable } from './workspace-code-runtime.types';
 
@@ -100,12 +101,15 @@ export type UiPlanOutcome =
 
 /** Petición cancelable del plan de la vista de pantalla. */
 export interface UiPlanRequest {
+  /** Id de la petición al host (el progreso en vivo llega con este id). */
+  id: string;
   promise: Promise<UiPlanOutcome>;
   cancel(): void;
 }
 
 /** Petición cancelable de un resultado de flujo (plan de pantalla o mapa de datos). */
 interface FlowResultRequest {
+  id: string;
   promise: Promise<UiPlanOutcome>;
   cancel(escape?: boolean): void;
 }
@@ -224,7 +228,7 @@ function emptyUi(): FlowUiState {
     busy: false, error: null, resultVisible: false, revealedFor: null,
     changeSide: 'before', changeCase: null, comparison: null, changeBusy: false, changeError: null,
     claudeRun: null, errorAction: null, changeErrorAction: null, resultSource: null,
-    dbStatus: 'idle', dbError: null, dbErrorAction: null, dbClaude: false,
+    dbStatus: 'idle', dbError: null, dbErrorAction: null, dbClaude: false, dbDeep: false, dbProgress: null,
   };
 }
 
@@ -281,6 +285,9 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Mapa de datos: petición propia, caché en memoria (`flowId|language|nexo`). */
   private dbRunId = 0;
   private dbCancel: ((escape?: boolean) => void) | null = null;
+  /** Id de la petición del reintento profundo en curso (para mostrar su progreso). */
+  private dbPendingId: string | null = null;
+  private readonly progressSub: Subscription;
   /** Carga del mapa en curso (también en segundo plano); solo una a la vez. */
   private dbInFlight: { flowId: string; runId: number } | null = null;
   /** Secuencia de la presentación de un mapa ya conocido (no invalida las cargas). */
@@ -295,9 +302,16 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     private i18n: WorkspaceCodeI18nService,
     private bridge: NexoBridge,
     private notify: WorkspaceCodeNotifyService,
-  ) {}
+  ) {
+    this.progressSub = this.bridge.progress$.subscribe(({ id, message }) => {
+      if (!this.dbPendingId || id !== this.dbPendingId) return;
+      this.ui = { ...this.ui, dbProgress: message.slice(0, 100) };
+      this.emit();
+    });
+  }
 
   ngOnDestroy(): void {
+    this.progressSub.unsubscribe();
     this.runId++;
     this.cancelPending();
     this.cancelSequence();
@@ -444,7 +458,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
         const uiLanes = new Set(flow.lanes.filter((l) => l.kind === 'ui').map((l) => l.id));
         flow.steps.forEach((s, i) => {
           const file = s.ref?.file ?? s.snippet?.ref?.file ?? '';
-          if (uiLanes.has(s.to) || uiLanes.has(s.from) || /\.html?$/i.test(file)) set!.add(i);
+          if (uiLanes.has(s.to) || uiLanes.has(s.from) || VIEW_TEMPLATE_RE.test(file)) set!.add(i);
         });
       }
       this.screenSteps.set(flow, set);
@@ -1534,8 +1548,14 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     return this.requestFlowResult('ui-plan', contextBase64, this.i18n.t('aiFlow.screen.failed'));
   }
 
+  /** Maqueta de la pantalla con la IA (UI_MOCK): la IA investiga la vista en cualquier tecnología. Cancelable. */
+  requestUiMock(contextBase64: string): UiPlanRequest {
+    return this.requestFlowResult('ui-mock', contextBase64, this.i18n.t('aiFlow.screen.failed'));
+  }
+
   /** Petición cancelable de un resultado de flujo al host (`POST …/flow/{kind}`). No toca el laboratorio. */
   private requestFlowResult(kind: FlowKind, contextBase64: string, failMessage: string): FlowResultRequest {
+    const id = this.bridge.newId();
     let settled = false;
     let resolveOuter!: (outcome: UiPlanOutcome) => void;
     const promise = new Promise<UiPlanOutcome>((resolve) => {
@@ -1548,10 +1568,9 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     };
     if (!this.flow) {
       finish({ status: 'error', message: failMessage });
-      return { promise, cancel: () => finish({ status: 'cancelled' }) };
+      return { id, promise, cancel: () => finish({ status: 'cancelled' }) };
     }
     const body = { language: this.i18n.language, contextBase64 };
-    const id = this.bridge.newId();
     this.bridge.request<FlowDiagnosisResponse>({ op: 'flow', kind, body }, id).then(
       (response) => {
         if (!response || !response.success) {
@@ -1566,6 +1585,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       },
     );
     return {
+      id,
       promise,
       cancel: () => {
         if (!settled) this.bridge.cancel(id);
@@ -1624,6 +1644,19 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.presentDbMap(known, conn);
   }
 
+  /**
+   * «Reintentar» (estado `error` o `empty`): petición profunda `db-map-sql`; el host lee las clases de acceso a datos y la IA
+   * busca las sentencias SQL y las entidades en todas las carpetas.
+   */
+  retryDbMap(): void {
+    const flow = this.flow;
+    if (!flow || !this.hasDb) return;
+    const reason = this.ui.dbStatus === 'empty' ? 'empty' : 'failed';
+    this.stopDbRequest();
+    this.dbMetaCache.clear();
+    void this.fetchDbMap(flow, true, reason);
+  }
+
   /** Precarga el mapa de datos en segundo plano al abrir un flujo (sin tocar el reproductor ni otros modos). */
   prefetchDbMap(): void {
     const flow = this.flow;
@@ -1635,19 +1668,20 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     void this.fetchDbMap(flow, false);
   }
 
-  private async fetchDbMap(flow: FlowDiagram, force: boolean): Promise<void> {
+  private async fetchDbMap(flow: FlowDiagram, force: boolean, deep: 'failed' | 'empty' | null = null): Promise<void> {
     const runId = ++this.dbRunId;
     this.dbInFlight = { flowId: flow.id, runId };
+    let pendingId: string | null = null;
     try {
       const language = this.i18n.language === 'en' ? 'en' : 'es';
       const cacheKey = `${flow.id}|${language}|nexo`;
       this.dbView = null;
       if (this.ui.mode === 'db') this.player.setStops(null);
-      this.ui = { ...this.ui, dbStatus: 'loading', dbError: null, dbErrorAction: null, dbClaude: false };
+      this.ui = { ...this.ui, dbStatus: 'loading', dbError: null, dbErrorAction: null, dbClaude: false, dbDeep: !!deep, dbProgress: null };
       this.emit();
       let prepared: { contextBase64: string; conn: FlowDbConnection | null };
       try {
-        prepared = await this.dbMapContext(flow, force);
+        prepared = await this.dbMapContext(flow, force, deep);
       } catch (error: unknown) {
         if (runId !== this.dbRunId) return;
         console.warn('[Traza] No se pudo preparar el contexto del mapa de datos.', error instanceof Error ? error.name : '');
@@ -1655,13 +1689,15 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
         return;
       }
       if (runId !== this.dbRunId) return;
-      const request = this.requestFlowResult('db-map', prepared.contextBase64, this.i18n.t('aiFlow.db.failed'));
+      const request = this.requestFlowResult(deep ? 'db-map-sql' : 'db-map', prepared.contextBase64, this.i18n.t('aiFlow.db.failed'));
       this.dbCancel = (escape?: boolean) => request.cancel(escape);
+      pendingId = request.id;
+      this.dbPendingId = request.id;
       const outcome = await request.promise;
       if (runId !== this.dbRunId) return;
       this.dbCancel = null;
       if (outcome.status === 'cancelled') {
-        this.ui = { ...this.ui, dbStatus: 'idle', dbClaude: false };
+        this.ui = { ...this.ui, dbStatus: 'idle', dbClaude: false, dbDeep: false, dbProgress: null };
         this.emit();
         return;
       }
@@ -1692,6 +1728,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       this.presentDbMap(stored, prepared.conn);
     } finally {
       if (this.dbInFlight?.runId === runId) this.dbInFlight = null;
+      if (pendingId && this.dbPendingId === pendingId) this.dbPendingId = null;
     }
   }
 
@@ -1699,11 +1736,12 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   cancelDbMap(): void {
     const cancel = this.dbCancel;
     this.dbCancel = null;
+    this.dbPendingId = null;
     this.dbInFlight = null;
     this.dbShowId++;
     this.dbRunId++;
     cancel?.(true);
-    if (this.ui.dbStatus === 'loading') this.ui = { ...this.ui, dbStatus: this.dbView ? 'ready' : 'idle', dbClaude: false };
+    if (this.ui.dbStatus === 'loading') this.ui = { ...this.ui, dbStatus: this.dbView ? 'ready' : 'idle', dbClaude: false, dbDeep: false, dbProgress: null };
     this.emit();
   }
 
@@ -1714,13 +1752,15 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     this.dbInFlight = null;
     const cancel = this.dbCancel;
     this.dbCancel = null;
+    this.dbPendingId = null;
     cancel?.(false);
-    if (this.ui.dbStatus === 'loading') this.ui = { ...this.ui, dbStatus: this.dbView ? 'ready' : 'idle', dbClaude: false };
+    if (this.ui.dbStatus === 'loading') this.ui = { ...this.ui, dbStatus: this.dbView ? 'ready' : 'idle', dbClaude: false, dbDeep: false, dbProgress: null };
   }
 
   private dbFail(message: string): void {
     this.dbCancel = null;
-    this.ui = { ...this.ui, dbStatus: 'error', dbError: message, dbErrorAction: null, dbClaude: false };
+    this.dbPendingId = null;
+    this.ui = { ...this.ui, dbStatus: 'error', dbError: message, dbErrorAction: null, dbClaude: false, dbDeep: false, dbProgress: null };
     this.emit();
   }
 
@@ -1744,7 +1784,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     };
     const empty = !indexes.length || !meta.tables.length;
     if (this.ui.mode === 'db') this.player.setStops(empty ? null : indexes);
-    this.ui = { ...this.ui, dbStatus: empty ? 'empty' : 'ready', dbError: null, dbErrorAction: null, dbClaude: false };
+    this.ui = { ...this.ui, dbStatus: empty ? 'empty' : 'ready', dbError: null, dbErrorAction: null, dbClaude: false, dbDeep: false, dbProgress: null };
     this.emit();
   }
 
@@ -1793,7 +1833,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
    * anterior (o su `codeSnapshot` si el archivo no se puede leer), hasta 4 entidades de los repositorios y, con una
    * conexión, un extracto del esquema real (solo nombres, tipos, PK, nullable y FK; nunca host, usuario, filas ni valores).
    */
-  private async dbMapContext(flow: FlowDiagram, _force: boolean): Promise<{ contextBase64: string; conn: FlowDbConnection | null }> {
+  private async dbMapContext(flow: FlowDiagram, _force: boolean, deep: 'failed' | 'empty' | null = null): Promise<{ contextBase64: string; conn: FlowDbConnection | null }> {
     const validator = await this.validator();
     const dbSteps = dbStepIndexes(flow).map((i) => flow.steps[i]);
     const { windows } = await this.codeWindowsWith({ ...flow, steps: dbSteps, files: [] }, new Map(), new Map(), DB_MAP_RADIUS);
@@ -1836,7 +1876,8 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       code: [],
       schema,
     };
-    return { contextBase64: this.encode({ ...context, code }), conn };
+    // Reintento profundo: el host lee las semillas (solo lectura, enmascaradas); el webview no envía código.
+    return { contextBase64: this.encode(deep ? { ...context, code: [], seeds: dbSourceSeeds(flow), reason: deep } : { ...context, code }), conn };
   }
 
   /** Extracto del esquema real: tablas candidatas y sus vecinas a un salto por FK (≤ 12, ≤ 30 columnas, PK y FK primero). */

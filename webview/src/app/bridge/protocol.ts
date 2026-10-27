@@ -6,7 +6,7 @@ import type { WorkspaceCodeDatabaseMetadata } from '../workspace-code/services/w
 
 export type { WorkspaceCodeDatabaseMetadata };
 
-export type FlowKind = 'simulate' | 'logs' | 'ui-plan' | 'db-map';
+export type FlowKind = 'simulate' | 'logs' | 'ui-plan' | 'ui-mock' | 'db-map' | 'db-map-sql';
 export type NexoLanguage = 'es' | 'en';
 
 /** Apariencia de la vista: paleta y fuentes originales de Traza, o los colores y fuentes del tema de VS Code. */
@@ -87,6 +87,8 @@ export type HostToWebview =
   | { type: 'response'; id: string; ok: true; result: unknown }
   | { type: 'response'; id: string; ok: false; error: string }
   | { type: 'filesChanged' }
+  /** Progreso en vivo de una petición `flow` en curso (solo texto para el popup; nunca pasa por `messages$`). */
+  | { type: 'progress'; id: string; message: string }
   | { type: 'fileSaved' };
 
 export interface ProjectMountInfo {

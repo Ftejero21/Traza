@@ -1949,6 +1949,27 @@ export const NX_IMAGE_PLACEHOLDER = 'data:image/svg+xml,' + encodeURIComponent(
   + '</svg>',
 );
 
+/**
+ * Maqueta de la IA (UI_MOCK): parsea su HTML con `DOMParser` (documento inerte, no se ejecuta nada), extrae el texto de
+ * todos los `<style>` (head y body) a `css` y los elimina, y deja las imágenes con el placeholder (sin `srcset` ni
+ * `<source>`). El documento NO está saneado: hay que marcar y pasar después por `sanitizeFragmentDom`, y el `css` por
+ * `sanitizeCss`.
+ */
+export function parseMockMarkup(html: string): { doc: Document; css: string } {
+  const doc = new DOMParser().parseFromString(String(html ?? ''), 'text/html');
+  let css = '';
+  for (const style of Array.from(doc.querySelectorAll('style'))) {
+    css += (style.textContent ?? '') + '\n';
+    style.remove();
+  }
+  for (const source of Array.from(doc.querySelectorAll('source'))) source.remove();
+  for (const img of Array.from(doc.querySelectorAll('img'))) {
+    img.setAttribute('src', NX_IMAGE_PLACEHOLDER);
+    img.removeAttribute('srcset');
+  }
+  return { doc, css };
+}
+
 /** Quita los data URI (para no superar el tamaño máximo del `srcdoc`). */
 export function stripInlineAssets(srcdoc: string): string {
   return srcdoc

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.2 (Preview)
+
+- Con `@traza`, la IA responde en el chat a la pregunta con un texto de resumen, seguido del recorrido una sola vez y el botón «Visualizar flujo». Si lo necesita, puede seguir buscando y leyendo el código para contestar.
+- «Visualizar pantalla» funciona con cualquier tecnología de vistas (JSP, Thymeleaf, HTML, React, Vue, Razor, PHP, Twig…).
+  - La IA localiza la vista, sus includes y sus estilos, y devuelve una maqueta estática con datos de ejemplo inventados.
+  - Mientras tanto, muestra qué está leyendo.
+- «Base de datos» → «Reintentar»: si el mapa falla o sale vacío, la IA lee las clases de acceso a datos del flujo, localiza sus sentencias SQL y entidades, y deduce las tablas, las columnas y las relaciones que hay que pintar.
+  - Muestra el progreso y se puede cancelar.
+- Corregido: la petición de «Visualizar pantalla» sin Angular se descartaba antes de llegar a la IA.
+
 ## 0.1.1 (Preview)
 
 - La IA de Copilot investiga el proyecto por su cuenta (búsqueda y lectura de solo lectura en todas las carpetas abiertas) antes de devolver el flujo o el cambio; Traza solo lo dibuja.

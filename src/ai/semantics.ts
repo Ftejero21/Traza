@@ -424,6 +424,40 @@ export function repairUiPlan(plan: Obj): void {
   fix(plan['after']);
 }
 
+/** Maqueta de pantalla (UI_MOCK): `css` ausente = '' y recorte de espacios en html, css y caption (también en `after`). */
+export function repairUiMock(root: Obj): void {
+  const fix = (body: unknown): void => {
+    if (!isObj(body)) return;
+    if (typeof body['css'] !== 'string') body['css'] = '';
+    for (const key of ['html', 'css', 'caption']) {
+      const value = body[key];
+      if (typeof value === 'string') body[key] = value.trim();
+    }
+  };
+  fix(root);
+  const after = root['after'];
+  if (isObj(after)) {
+    const css = after['css'];
+    fix(after);
+    // `after.css` puede omitirse si no cambia.
+    if (typeof css !== 'string') delete after['css'];
+  }
+}
+
+/** Reglas de FORMATO de la maqueta que el esquema no expresa: `html` y `after.html` con etiquetas. Nunca juzga el contenido. */
+export function uiMockErrors(root: unknown): string[] {
+  const errors: string[] = [];
+  if (!isObj(root)) return ['$: debe ser un objeto'];
+  const check = (body: Obj, path: string): void => {
+    const html = body['html'];
+    if (typeof html !== 'string' || !html.trim().includes('<')) errors.push(`${path}.html: debe ser HTML con etiquetas`);
+  };
+  check(root, '$');
+  const after = root['after'];
+  if (isObj(after)) check(after, '$.after');
+  return limit(errors);
+}
+
 /** Reglas del UiPreviewPlan que el esquema no expresa: sin marcado en selectores, root e inject, y tamaños de bindings/inputs. */
 export function uiPlanErrors(plan: unknown): string[] {
   const errors: string[] = [];

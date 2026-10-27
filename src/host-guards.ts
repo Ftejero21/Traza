@@ -77,7 +77,7 @@ const OPS = new Set([
   'listFiles', 'readFile', 'readMountFile', 'flow', 'copy',
   'compareChange', 'dbExplain', 'applyFiles', 'confirm', 'dbConnections', 'dbMetadata',
 ]);
-const KINDS = new Set<FlowKind>(['simulate', 'logs', 'ui-plan', 'db-map']);
+const KINDS = new Set<FlowKind>(['simulate', 'logs', 'ui-plan', 'ui-mock', 'db-map', 'db-map-sql']);
 const PROPOSAL_ID = /^[A-Za-z0-9._:-]{1,100}$/;
 const BASE64 = /^[A-Za-z0-9+/=]*$/;
 const LANGUAGES = new Set<NexoLanguage>(['es', 'en']);

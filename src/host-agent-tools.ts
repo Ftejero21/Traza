@@ -228,6 +228,22 @@ export class AgentToolSession {
     return this.byUri.get(WIN32 ? id.toLowerCase() : id) ?? null;
   }
 
+  /** Ruta del mapa de `mountId` + `file` (relativo a la carpeta); `null` si no existe entre los archivos permitidos. */
+  pathFor(mountId: string, file: string): string | null {
+    const rel = normalizeCodePath(file.trim().replace(/\\/g, '/'));
+    if (!rel) return null;
+    const mount = mountId.trim();
+    const candidates = this.multi ? [`${mount}/${rel}`, rel] : [rel, `${mount}/${rel}`];
+    for (const candidate of candidates) {
+      if (this.byPath.has(candidate)) return candidate;
+    }
+    for (const candidate of candidates) {
+      const same = this.byLower.get(candidate.toLowerCase());
+      if (same?.length === 1) return same[0];
+    }
+    return null;
+  }
+
   /* ------------------------------ resumen ------------------------------ */
 
   overview(): string {

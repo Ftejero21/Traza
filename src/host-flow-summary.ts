@@ -186,19 +186,25 @@ function stepLines(flow: Record<string, unknown>, max: number, esc: (s: string) 
 
 const MAX_CHAT_STEPS = 8;
 
-/** Markdown del chat de `@traza`: título, resumen, escenario y pasos; todo texto de la IA escapado. */
-export function formatFlowChatMarkdown(generated: GeneratedFlow): string {
+/**
+ * Markdown del chat de `@traza`: título, resumen, escenario y pasos; todo texto de la IA escapado.
+ * Con `compact` (debajo de la respuesta de la IA): título «Recorrido»/«Walkthrough», sin resumen y, del escenario, solo su línea
+ * y dónde falla o se detiene; después los pasos con archivo:línea.
+ */
+export function formatFlowChatMarkdown(generated: GeneratedFlow, opts?: { compact?: boolean }): string {
   const es = isSpanish();
+  const compact = opts?.compact === true;
   const flow = generated.flow;
   const esc = escapeMarkdown;
-  const parts: string[] = [`**${esc(oneLine(generated.title, 120))}**`];
+  const title = oneLine(generated.title, 120);
+  const parts: string[] = [compact ? `**${esc(`${es ? 'Recorrido' : 'Walkthrough'}: ${title}`)}**` : `**${esc(title)}**`];
   const summary = oneLine(flow['summary'], MAX_SUMMARY);
-  if (summary) parts.push(esc(summary));
+  if (summary && !compact) parts.push(esc(summary));
   const info = scenarioInfo(generated);
   if (info) {
     const badge = info.badge ? ` · ${info.badge}` : '';
     const block: string[] = [`**${esc(`${es ? 'Escenario' : 'Scenario'}: ${info.label}${badge}`)}**`];
-    if (info.userImpact) block.push(`**${es ? 'Qué ve el usuario' : 'What the user sees'}:** ${esc(info.userImpact)}`);
+    if (info.userImpact && !compact) block.push(`**${es ? 'Qué ve el usuario' : 'What the user sees'}:** ${esc(info.userImpact)}`);
     if (info.kind === 'error' || info.kind === 'stop') {
       const head = info.kind === 'error' ? (es ? 'Dónde falla' : 'Where it fails') : (es ? 'Dónde se detiene' : 'Where it stops');
       const step = info.stepIndex ? `${es ? 'paso' : 'step'} ${info.stepIndex}` : '';
@@ -206,10 +212,10 @@ export function formatFlowChatMarkdown(generated: GeneratedFlow): string {
       const place = whereText(info.where, esc);
       const text = `${step}${label}${place ? ` (${place})` : ''}`.trim();
       if (text) block.push(`**${head}:** ${text}`);
-    } else if (info.kind === 'ok') {
+    } else if (info.kind === 'ok' && !compact) {
       block.push(es ? 'El flujo termina correctamente.' : 'The flow ends successfully.');
     }
-    if (info.conclusion) block.push(`**${es ? 'Conclusión' : 'Conclusion'}:** ${esc(info.conclusion)}`);
+    if (info.conclusion && !compact) block.push(`**${es ? 'Conclusión' : 'Conclusion'}:** ${esc(info.conclusion)}`);
     parts.push(block.join('\n\n'));
   } else if (generated.scenarioAsked) {
     parts.push(es
@@ -227,6 +233,84 @@ export function formatFlowChatMarkdown(generated: GeneratedFlow): string {
     parts.push(`**${es ? 'Pasos' : 'Steps'}**\n\n${list}${more}`);
   }
   return parts.join('\n\n');
+}
+
+/* ------------------------------ texto del modelo ------------------------------ */
+
+const CODE_SPAN = /(`+)[^`]*\1/g;
+const PLACEHOLDER = /\u0000(\d+)\u0000/g;
+const REFERENCE_DEFINITION = /^ {0,3}\[[^\]]*\]:/;
+
+/** Saneado de una línea fuera de bloque de código: sin imágenes, enlaces, definiciones de referencia ni HTML. Los code spans no se tocan. */
+function sanitizeModelLine(line: string): string {
+  if (REFERENCE_DEFINITION.test(line)) return '';
+  const spans: string[] = [];
+  const masked = line.replace(/\u0000/g, '').replace(CODE_SPAN, (m) => {
+    spans.push(m);
+    return `\u0000${spans.length - 1}\u0000`;
+  });
+  const clean = masked
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/!\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    .replace(/<(?=[A-Za-z/!])/g, '&lt;');
+  return clean.replace(PLACEHOLDER, (_m, i: string) => spans[Number(i)] ?? '');
+}
+
+/**
+ * Escritor del Markdown del modelo para `stream.markdown`: acumula los fragmentos y emite solo líneas completas, saneadas
+ * (imágenes → alt, enlaces → texto, definiciones de referencia fuera, `<` → `&lt;`). Dentro de bloques de código y code
+ * spans no se toca nada. `end()` vacía el resto, cierra un fence abierto y devuelve los caracteres no vacíos recibidos.
+ * El texto sale siempre como `string` (nunca como MarkdownString confiable).
+ */
+export function modelMarkdownWriter(emit: (md: string) => void): { push(chunk: string): void; end(): number } {
+  let buffer = '';
+  let fence: { ch: string; len: number } | null = null;
+  let total = 0;
+  const processLine = (line: string): string => {
+    const body = line.replace(/\r?\n$/, '');
+    const trimmed = body.trim();
+    const marker = /^(`{3,}|~{3,})/.exec(trimmed)?.[1] ?? '';
+    if (fence) {
+      if (marker && marker[0] === fence.ch && marker.length >= fence.len && trimmed === marker) fence = null;
+      return line;
+    }
+    if (marker) {
+      fence = { ch: marker[0], len: marker.length };
+      return line;
+    }
+    const clean = sanitizeModelLine(body);
+    return clean || !body ? `${clean}${line.slice(body.length)}` : '';
+  };
+  const flush = (text: string): void => {
+    if (!text) return;
+    const out = text.split(/(?<=\n)/).map(processLine).join('');
+    if (out) emit(out);
+  };
+  return {
+    push(chunk: string): void {
+      if (!chunk) return;
+      total += chunk.replace(/\s/g, '').length;
+      buffer += chunk;
+      const last = buffer.lastIndexOf('\n');
+      if (last < 0) return;
+      const complete = buffer.slice(0, last + 1);
+      buffer = buffer.slice(last + 1);
+      flush(complete);
+    },
+    end(): number {
+      const rest = buffer;
+      buffer = '';
+      flush(rest);
+      if (fence) {
+        const closing = fence.ch.repeat(fence.len);
+        fence = null;
+        emit(`\n${closing}`);
+      }
+      return total;
+    },
+  };
 }
 
 /* ------------------------------ cambios ------------------------------ */

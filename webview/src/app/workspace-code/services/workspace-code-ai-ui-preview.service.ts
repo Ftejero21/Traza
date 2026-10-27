@@ -1,5 +1,5 @@
 import { Injectable, OnDestroy } from '@angular/core';
-import { Subject } from 'rxjs';
+import { Subject, Subscription } from 'rxjs';
 import { NexoBridge } from '../../bridge/nexo-bridge';
 import { WorkspaceCodeI18nService } from '../i18n/workspace-code-i18n.service';
 import { NexoProjectService } from '../../project/nexo-project.service';
@@ -13,16 +13,17 @@ import {
   normalizeCodePath,
   resolveCodeReference,
 } from '../workspace-code.types';
-import { CodeRef, FlowStep, UiPlanContext, UiPlanFile, UiPreviewPlan, UiPreviewState } from '../ai/nexo-ia.types';
+import { CodeRef, FlowDiagram, FlowStep, UiMock, UiMockContext, UiPlanContext, UiPlanFile, UiPreviewPlan, UiPreviewState } from '../ai/nexo-ia.types';
 import { ChangeProposal, FileChange } from '../ai/nexo-ia.changes.types';
 import { applyFileChange, resolveChangeTarget, safeRelativePath, sha256Hex } from '../ai/workspace-code-ai-change-patch';
 import { maskConfigSecrets, maskSensitiveText } from '../ai/workspace-code-ai-mask';
 import { FlowRefValidator } from '../ai/workspace-code-flow-ref-validator';
-import { sanitizeUiPreviewPlan } from '../ai/workspace-code-flow-sanitize';
+import { sanitizeUiMock, sanitizeUiPreviewPlan } from '../ai/workspace-code-flow-sanitize';
 import { isContextExcludedDir } from '../ai/workspace-code-context-exclude';
 import { compileScss } from '../ai/workspace-code-scss-compiler';
 import {
   ComponentMeta,
+  VIEW_TEMPLATE_RE,
   childTags,
   extractTsDefaults,
   focusTsForAi,
@@ -42,6 +43,7 @@ import {
   encapsulateCss,
   markAndDecorate,
   openModalsForPlan,
+  parseMockMarkup,
   replaceCanvasPlaceholders,
   resolveTemplate,
   reverseFileChange,
@@ -94,6 +96,8 @@ export interface UiScreenView {
   };
   /** Falta `node_modules` (o un paquete): los estilos de librerías no se muestran. */
   missingDeps: boolean;
+  /** Maqueta de la IA (UI_MOCK) en lugar del render local con el HTML y CSS reales. */
+  mock: boolean;
 }
 
 /** Partes de una variante independientes del tamaño de pantalla (CSS y HTML ya saneados). */
@@ -107,6 +111,15 @@ interface ViewParts {
   state: UiPreviewState;
   approximate: boolean;
   missingDeps: boolean;
+  mock: boolean;
+}
+
+/** Vista de la pantalla de un paso resuelta para la maqueta de la IA (cualquier tecnología). */
+interface MockTarget {
+  seeds: UiMockContext['seeds'];
+  stepIndex: number;
+  name: string;
+  refLine: string;
 }
 
 type PartsPair = { now?: ViewParts; after?: ViewParts };
@@ -254,6 +267,11 @@ const LIMIT_SIMULATION = 20000;
 const LIMIT_CHANGE = 40000;
 const LIMIT_JSON = 300000;
 const MAX_CONTEXT_BASE64 = 390000;
+/** Contrato UI_MOCK: el host rechaza contextos de más de 80 000 caracteres. */
+const LIMIT_MOCK_JSON = 80000;
+const MOCK_MAX_SEEDS = 4;
+const MOCK_MAX_STEPS = 30;
+const MOCK_NAME_CHARS = 40;
 /** Recortes por tamaño de la entrada. */
 const SOFT_TOKENS = 8000;
 const HARD_CHARS = 48000;
@@ -529,6 +547,12 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   /** Recalculando las vistas para otro tamaño. */
   viewportBusy = false;
   readonly viewports = UI_VIEWPORTS;
+  /** Vista del paso para la maqueta con IA (cualquier tecnología); se usa si no hay componente Angular. */
+  mockTarget: MockTarget | null = null;
+  /** La carga actual es una maqueta de la IA (no el render local de un componente Angular). */
+  mockMode = false;
+  /** Progreso en vivo del agente de la IA («Leyendo X…»), ≤ 100 caracteres. */
+  progressText = '';
 
   /** Se está buscando el componente del paso (`resolveTarget` en curso). */
   private resolving = false;
@@ -539,6 +563,9 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   private viewportRun = 0;
   private pending: UiPlanRequest | null = null;
   private readonly planCache = new Map<string, UiPreviewPlan>();
+  /** Maquetas de la IA por flujo + paso + escenario + cambio (en memoria de la webview). */
+  private readonly mockCache = new Map<string, UiMock>();
+  private readonly progressSub: Subscription;
   private readonly renderCache = new Map<string, PartsPair>();
   /** Partes de la carga actual (para recalcular otros tamaños sin volver a renderizar). */
   private parts: PartsPair | null = null;
@@ -564,9 +591,15 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   ) {
     const saved = this.bridge.getUiState(VIEWPORT_STATE_KEY);
     this.viewport = isViewportId(saved) ? saved : DEFAULT_VIEWPORT;
+    this.progressSub = this.bridge.progress$.subscribe(({ id, message }) => {
+      if (!this.pending || id !== this.pending.id) return;
+      this.progressText = message.slice(0, 100);
+      this.changed$.next();
+    });
   }
 
   ngOnDestroy(): void {
+    this.progressSub.unsubscribe();
     this.cancelPlan();
     this.resolveRun++;
     this.clearViewState();
@@ -607,7 +640,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   show(tab?: UiPreviewTab): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    if (!this.target) {
+    if (!this.target && (this.resolving || !this.mockTarget)) {
       this.open = true;
       if (this.resolving) {
         // Aún se busca el componente: se abre al terminar (la carga o el error los decide `resolveTarget`).
@@ -632,8 +665,8 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     if (this.status === 'loading') return;
     this.status = 'idle';
     const ctx = this.ctx;
-    if (ctx && !this.target) {
-      // Sin componente: se vuelve a buscar y se abre al terminar.
+    if (ctx && !this.target && !this.mockTarget) {
+      // Sin componente ni vista: se vuelve a buscar y se abre al terminar.
       this.errorText = null;
       this.open = true;
       this.openWhenReady = true;
@@ -747,6 +780,9 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     this.zoom = false;
     this.tab = 'now';
     this.target = null;
+    this.mockTarget = null;
+    this.mockMode = false;
+    this.progressText = '';
     this.screenStep = -1;
     this.componentName = '';
     this.refLine = '';
@@ -774,7 +810,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         const wanted = this.openWhenReady;
         this.openWhenReady = false;
         if (wanted && this.ctx === ctx) {
-          if (this.target) {
+          if (this.target || this.mockTarget) {
             if (this.status !== 'ready' && this.status !== 'loading') void this.load();
           } else {
             this.status = 'error';
@@ -789,6 +825,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   private async findTarget(ctx: UiScreenContext, run: number): Promise<void> {
     const flow = this.flowService.flow;
     if (!flow) return;
+    this.mockTarget = this.mockTargetFor(ctx);
     try {
       const isAllowed = await this.project.fileFilter();
       const validator = new FlowRefValidator(this.project, isAllowed);
@@ -814,6 +851,58 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     } catch (error: unknown) {
       console.warn('[Traza] No se pudo localizar el componente de la pantalla.', error instanceof Error ? error.name : '');
     }
+    // Sin componente Angular: la IA maqueta la vista del paso (JSP, Thymeleaf, JSX, Vue, Razor, PHP…).
+    const mock = this.mockTarget;
+    if (!this.target && mock && run === this.resolveRun) {
+      this.screenStep = ctx.anchor;
+      this.componentName = mock.name;
+      this.refLine = mock.refLine;
+      this.changed$.next();
+    }
+  }
+
+  /**
+   * Vista del paso para la maqueta: el paso de pantalla más cercano al ancla (el anterior o igual y, si no lo hay, el
+   * siguiente) o el primero con un ref a una plantilla de vista. Semillas = refs de ese paso, del ancla y del paso previo
+   * (únicas, máximo 4, las de vista primero).
+   */
+  private mockTargetFor(ctx: UiScreenContext): MockTarget | null {
+    const flow = this.flowService.flow;
+    if (!flow || !flow.steps.length) return null;
+    const last = flow.steps.length - 1;
+    const anchor = Math.min(Math.max(ctx.anchor, 0), last);
+    const refsOf = (i: number): CodeRef[] => {
+      const step = flow.steps[i];
+      return step ? [step.ref, step.snippet?.ref ?? null].filter((r): r is CodeRef => !!r) : [];
+    };
+    const isView = (r: CodeRef): boolean => VIEW_TEMPLATE_RE.test(r.file);
+    const order: number[] = [];
+    for (let i = anchor; i >= 0; i--) order.push(i);
+    for (let i = anchor + 1; i <= last; i++) order.push(i);
+    const stepIndex = order.find((i) => this.flowService.isScreenStep(i) || refsOf(i).some(isView));
+    if (stepIndex === undefined) return null;
+    const refs: CodeRef[] = [...refsOf(stepIndex)];
+    if (anchor !== stepIndex) refs.push(...refsOf(anchor));
+    if (stepIndex > 0) refs.push(...refsOf(stepIndex - 1));
+    const seen = new Set<string>();
+    const unique: CodeRef[] = [];
+    for (const ref of refs) {
+      if (!safeRelativePath(ref.file) || ref.file.length > 400 || String(ref.mountId ?? '').length > 200) continue;
+      const key = `${ref.mountId}\u0000${ref.file}\u0000${ref.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(ref);
+    }
+    const ordered = [...unique.filter(isView), ...unique.filter((r) => !isView(r))].slice(0, MOCK_MAX_SEEDS);
+    const viewRef = ordered.find(isView);
+    const seeds = ordered.map((r) => ({ mountId: String(r.mountId ?? ''), file: r.file, line: Math.max(1, Math.trunc(Number(r.line)) || 1) }));
+    const label = (flow.steps[stepIndex].label || flow.steps[stepIndex].title || '').trim().slice(0, MOCK_NAME_CHARS);
+    return {
+      seeds,
+      stepIndex,
+      name: viewRef ? basename(viewRef.file) : label,
+      refLine: viewRef ? basename(viewRef.file) : seeds[0] ? basename(seeds[0].file) : '',
+    };
   }
 
   private refLineOf(target: ScreenTarget): string {
@@ -863,16 +952,32 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
   private async load(): Promise<void> {
     const ctx = this.ctx;
     const target = this.target;
-    if (!ctx || !target) return;
+    if (!ctx || (!target && !this.mockTarget)) return;
     this.cancelPlan();
     const run = this.loadRun;
     this.clearViewState();
     this.status = 'loading';
     this.errorText = null;
     this.zoom = false;
+    this.progressText = '';
+    this.mockMode = false;
     this.changed$.next();
     try {
-      const build = await this.buildContext(ctx, target);
+      if (!target) {
+        await this.loadMock(ctx, run);
+        return;
+      }
+      let build: ScreenBuild;
+      try {
+        build = await this.buildContext(ctx, target);
+      } catch (error: unknown) {
+        if (run !== this.loadRun) return;
+        // Si el contexto Angular no se pudo reunir (no por un fallo de la IA), la IA maqueta la vista del paso.
+        if (!this.mockTarget) throw error;
+        console.warn('[Traza] Contexto del componente no disponible; maqueta con IA.', error instanceof Error ? error.name : '');
+        await this.loadMock(ctx, run);
+        return;
+      }
       if (run !== this.loadRun) return;
       let plan = this.planCache.get(build.planKey) ?? null;
       if (!plan) {
@@ -905,10 +1010,137 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     } catch (error: unknown) {
       if (run !== this.loadRun) return;
       if (!(error instanceof ScreenError)) console.warn('[Traza] Vista de pantalla no disponible.', error instanceof Error ? error.name : '');
+      this.progressText = '';
       this.status = 'error';
       this.errorText = error instanceof ScreenError ? error.message : this.i18n.t('aiFlow.screen.failed');
       this.changed$.next();
     }
+  }
+
+  /* ---------------------------- maqueta con IA (UI_MOCK) ---------------------------- */
+
+  /**
+   * La IA investiga la vista del paso (en cualquier tecnología) con las herramientas de solo lectura del host y devuelve una
+   * maqueta HTML + CSS con datos de ejemplo. Aquí solo se sanea y se pinta en el iframe sandbox.
+   */
+  private async loadMock(ctx: UiScreenContext, run: number): Promise<void> {
+    const flow = this.flowService.flow;
+    const mockTarget = this.mockTarget;
+    if (!flow || !mockTarget) throw new ScreenError(this.i18n.t('aiFlow.screen.failed'));
+    this.mockMode = true;
+    this.changed$.next();
+    const context = this.mockContext(ctx, flow, mockTarget);
+    const key = await sha256Hex(`ui-mock\u0000${context.json}`);
+    if (run !== this.loadRun) return;
+    let mock = this.mockCache.get(key) ?? null;
+    if (!mock) {
+      const request = this.flowService.requestUiMock(context.base64);
+      this.pending = request;
+      const outcome = await request.promise;
+      if (this.pending === request) this.pending = null;
+      if (run !== this.loadRun || outcome.status === 'cancelled') return;
+      if (outcome.status === 'error') throw new ScreenError(outcome.message);
+      mock = sanitizeUiMock(outcome.plan);
+      if (!mock) throw new ScreenError(this.i18n.t('aiFlow.screen.failed'));
+      remember(this.mockCache, key, mock, MAX_CACHE);
+    }
+    const parts = this.renderMock(mock, ctx);
+    const vp = this.viewport;
+    const views = await this.finishViews(parts, viewportSpec(vp));
+    if (run !== this.loadRun) return;
+    this.plan = null;
+    this.parts = parts;
+    this.viewCache.clear();
+    remember(this.viewCache, vp, views, MAX_VIEW_CACHE);
+    this.assignViews(views);
+    if (mock.view) this.refLine = basename(mock.view.replace(/\\/g, '/'));
+    this.progressText = '';
+    this.status = 'ready';
+    console.info(`[Traza] Vista de pantalla (maqueta): html≈${mock.html.length} css≈${mock.css.length}`);
+    this.changed$.next();
+  }
+
+  /** Contexto de UI_MOCK (enmascarado y dentro de los límites del host). */
+  private mockContext(ctx: UiScreenContext, flow: FlowDiagram, target: MockTarget): { json: string; base64: string } {
+    const step = flow.steps[target.stepIndex];
+    const mask = (text: string, max: number): string => maskSensitiveText(String(text ?? '')).slice(0, max);
+    const refText = (s: FlowStep): string | null => (s.ref ? `${s.ref.mountId}/${s.ref.file}:${s.ref.line}`.slice(0, 600) : null);
+    const end = Math.min(flow.steps.length - 1, Math.max(ctx.anchor, target.stepIndex));
+    let steps: UiMockContext['steps'] = flow.steps.slice(0, end + 1).map((s, i) => ({
+      index: i + 1,
+      label: mask(s.label, 120),
+      title: mask(s.title, 120),
+      ref: refText(s),
+      ui: s.ui?.what ? mask(s.ui.what, 120) : null,
+    })).slice(-MOCK_MAX_STEPS);
+    const applied = ctx.proposal?.status === 'applied';
+    const changeBase = this.changeContext(ctx.proposal);
+    const change = changeBase ? { ...changeBase, applied } : null;
+    const simulation = this.simulationFor(ctx, flow);
+    const make = (): UiMockContext => ({
+      flowId: flow.id,
+      question: mask(flow.question ?? '', 500),
+      screen: {
+        index: target.stepIndex + 1,
+        id: String(step?.id ?? '').slice(0, 200),
+        title: mask(step?.title ?? '', 300),
+        label: mask(step?.label ?? '', 300),
+        what: mask(step?.ui?.what ?? '', 500),
+        kind: step?.ui?.kind ? String(step.ui.kind).slice(0, 80) : null,
+      },
+      steps,
+      seeds: target.seeds,
+      simulation,
+      change,
+    });
+    let json = JSON.stringify(make());
+    let base64 = encodeUtf8Base64(json);
+    const tooBig = (): boolean => json.length > Math.min(LIMIT_JSON, LIMIT_MOCK_JSON) || base64.length > MAX_CONTEXT_BASE64;
+    // Primero se recortan los pasos del recorrido (los más antiguos) y después los datos de entrada.
+    while (tooBig() && steps.length) {
+      steps = steps.slice(1);
+      json = JSON.stringify(make());
+      base64 = encodeUtf8Base64(json);
+    }
+    if (tooBig() && simulation.input !== null) {
+      simulation.input = null;
+      json = JSON.stringify(make());
+      base64 = encodeUtf8Base64(json);
+    }
+    if (tooBig()) throw new ScreenError(this.i18n.t('aiFlow.screen.failed'));
+    return { json, base64 };
+  }
+
+  /**
+   * Maqueta → partes saneadas por variante. El HTML de la IA no es de fiar: `DOMParser` (documento inerte), marca,
+   * `sanitizeFragmentDom` y CSS por `sanitizeCss`; solo se pinta en el iframe sandbox.
+   */
+  private renderMock(mock: UiMock, ctx: UiScreenContext): PartsPair {
+    const out: PartsPair = {};
+    for (const variant of (ctx.proposal ? ['now', 'after'] : ['now']) as UiPreviewVariant[]) {
+      let approximate = false;
+      const body = variant === 'after' ? mock.after ?? mock : mock;
+      if (variant === 'after' && !mock.after) approximate = true;
+      const css = body.css ?? mock.css;
+      const { doc, css: inner } = parseMockMarkup(body.html);
+      if (markAndDecorate(doc, { state: body.state, mark: body.mark }, variant).approximate) approximate = true;
+      openModalsForPlan(doc, body.root || 'body');
+      replaceCanvasPlaceholders(doc, this.i18n.t('aiFlow.screen.chart'));
+      sanitizeFragmentDom(doc);
+      out[variant] = {
+        globalCss: '',
+        componentCss: sanitizeCss(`${inner}\n${css}`),
+        html: doc.body.innerHTML,
+        tone: uiToneOf(body.state),
+        root: body.root || 'body',
+        caption: body.caption,
+        state: body.state,
+        approximate,
+        missingDeps: false,
+        mock: true,
+      };
+    }
+    return out;
   }
 
   /* ---------------------------- contexto ---------------------------- */
@@ -965,33 +1197,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     // Contexto para la IA (todo enmascarado; límites del contrato).
     const mask = (path: string, text: string): string => maskConfigSecrets(path, maskSensitiveText(text));
     const fileOf = (f: SourceFile, max: number): UiPlanFile => ({ path: f.path, content: mask(f.path, f.text).slice(0, max) });
-    const step = flow.steps[ctx.anchor];
-    const before = ctx.before;
-    const simulation: UiPlanContext['simulation'] = {
-      mode: ctx.mode,
-      step: { index: ctx.anchor + 1, id: step?.id ?? '', title: step?.title ?? '', label: step?.label ?? '' },
-      kind: before.kind,
-      badge: before.badge,
-      title: before.title,
-      userImpact: before.userImpact,
-      fix: before.fix,
-      input: ctx.input,
-    };
-    if (before.httpStatus !== undefined) simulation.httpStatus = before.httpStatus;
-    if (before.field) simulation.field = before.field;
-    if (ctx.afterResult) {
-      simulation.after = { kind: ctx.afterResult.kind, badge: ctx.afterResult.badge, title: ctx.afterResult.title, userImpact: ctx.afterResult.userImpact };
-    }
-    if (JSON.stringify(simulation).length > LIMIT_SIMULATION) {
-      let raw = '';
-      try {
-        raw = JSON.stringify(ctx.input) ?? '';
-      } catch (error: unknown) {
-        console.warn('[Traza] Datos de entrada no serializables.', error instanceof Error ? error.name : '');
-      }
-      simulation.input = raw.slice(0, 8000);
-      if (JSON.stringify(simulation).length > LIMIT_SIMULATION) simulation.input = null;
-    }
+    const simulation = this.simulationFor(ctx, flow);
     const change = this.changeContext(ctx.proposal);
 
     // Solo para la IA: TS sin comentarios/imports/console, hijos sin CSS y CSS global recortado a las reglas usadas.
@@ -1065,6 +1271,38 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       globals.map((g) => g.css), ctx.proposal ? [ctx.proposal.id, ctx.proposal.status] : null, ctx.mode,
     ]));
     return { env, root, children, wrappers, globals, contextJson: json, contextBase64, planKey, filesKey, htmlTrim };
+  }
+
+  /** Resultado de la simulación del escenario (paso ancla, veredicto, datos de entrada y «después»), dentro de `LIMIT_SIMULATION`. */
+  private simulationFor(ctx: UiScreenContext, flow: FlowDiagram): UiPlanContext['simulation'] {
+    const step = flow.steps[ctx.anchor];
+    const before = ctx.before;
+    const simulation: UiPlanContext['simulation'] = {
+      mode: ctx.mode,
+      step: { index: ctx.anchor + 1, id: step?.id ?? '', title: step?.title ?? '', label: step?.label ?? '' },
+      kind: before.kind,
+      badge: before.badge,
+      title: before.title,
+      userImpact: before.userImpact,
+      fix: before.fix,
+      input: ctx.input,
+    };
+    if (before.httpStatus !== undefined) simulation.httpStatus = before.httpStatus;
+    if (before.field) simulation.field = before.field;
+    if (ctx.afterResult) {
+      simulation.after = { kind: ctx.afterResult.kind, badge: ctx.afterResult.badge, title: ctx.afterResult.title, userImpact: ctx.afterResult.userImpact };
+    }
+    if (JSON.stringify(simulation).length > LIMIT_SIMULATION) {
+      let raw = '';
+      try {
+        raw = JSON.stringify(ctx.input) ?? '';
+      } catch (error: unknown) {
+        console.warn('[Traza] Datos de entrada no serializables.', error instanceof Error ? error.name : '');
+      }
+      simulation.input = raw.slice(0, 8000);
+      if (JSON.stringify(simulation).length > LIMIT_SIMULATION) simulation.input = null;
+    }
+    return simulation;
   }
 
   /**
@@ -1518,7 +1756,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
         approximate = true;
       }
       const frame = await this.measureFrame(srcdoc, p.root, vp);
-      out[variant] = { srcdoc, approximate, caption: p.caption, state: p.state, viewport: vp.id, frame, missingDeps: p.missingDeps };
+      out[variant] = { srcdoc, approximate, caption: p.caption, state: p.state, viewport: vp.id, frame, missingDeps: p.missingDeps, mock: p.mock };
     }
     return out;
   }
@@ -1728,6 +1966,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       state: plan.state,
       approximate: approximate || env.approximate,
       missingDeps: env.missingDeps,
+      mock: false,
     };
   }
 

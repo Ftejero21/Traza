@@ -163,8 +163,14 @@ export function simulatePreset(presetId: string, flow: FlowDiagram = SAMPLE_FLOW
 
 /** Respuesta simulada de `POST …/flow/{kind}`. */
 export function sampleFlowResponse(kind: FlowKind, contextBase64: string): FlowDiagnosisResponse {
+  if (kind === 'ui-mock') {
+    return {
+      success: false, codigo: 'UNAVAILABLE', mensaje: 'La maqueta con IA no está disponible en el modo navegador.',
+      operation: 'UI_MOCK', result: null, model: 'Mock', usage: null, cached: false,
+    };
+  }
   const ctx = decodeContext(contextBase64);
-  const result = kind === 'simulate' ? simulate(ctx) : kind === 'logs' ? logs(ctx) : kind === 'db-map' ? SAMPLE_DB_MAP : uiPlan();
-  const operation = kind === 'simulate' ? 'SIMULATE' : kind === 'logs' ? 'LOGS' : kind === 'db-map' ? 'DB_MAP' : 'UI_PLAN';
+  const result = kind === 'simulate' ? simulate(ctx) : kind === 'logs' ? logs(ctx) : kind === 'db-map' || kind === 'db-map-sql' ? SAMPLE_DB_MAP : uiPlan();
+  const operation = kind === 'simulate' ? 'SIMULATE' : kind === 'logs' ? 'LOGS' : kind === 'db-map' ? 'DB_MAP' : kind === 'db-map-sql' ? 'DB_MAP_SQL' : 'UI_PLAN';
   return { success: true, codigo: 'OK', mensaje: null, operation, result, model: 'Mock', usage: null, cached: false };
 }

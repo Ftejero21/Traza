@@ -133,7 +133,8 @@
           <div class="wcf-uip__loading" *ngIf="preview.status === 'loading' || preview.status === 'idle'" role="status">
             <span class="wce-dots" aria-hidden="true"><span class="wce-dot"></span><span class="wce-dot"></span><span class="wce-dot"></span></span>
             <p class="wcf-uip__loading-title">{{ 'aiFlow.screen.loadingPrefix' | wcT }} <b>{{ preview.componentName || '…' }}</b></p>
-            <p class="wcf-uip__loading-sub">{{ 'aiFlow.screen.loadingSub' | wcT }}</p>
+            <p class="wcf-uip__loading-sub">{{ (preview.mockMode ? 'aiFlow.screen.loadingSubMock' : 'aiFlow.screen.loadingSub') | wcT }}</p>
+            <p class="wcf-uip__loading-sub" *ngIf="preview.progressText">{{ preview.progressText }}</p>
           </div>
           <div class="wcf-uip__state is-error" *ngIf="preview.status === 'error'" role="alert">
             <i class="bi bi-exclamation-triangle" aria-hidden="true"></i>
@@ -154,7 +155,7 @@
             <p class="wcf-uip__deps" *ngIf="v.missingDeps" role="note">
               <i class="bi bi-box-seam" aria-hidden="true"></i>{{ 'aiFlow.screen.missingDeps' | wcT }}
             </p>
-            <p class="wcf-uip__local"><i class="bi bi-stars" aria-hidden="true"></i>{{ 'aiFlow.screen.footer' | wcT }}</p>
+            <p class="wcf-uip__local"><i class="bi bi-stars" aria-hidden="true"></i>{{ (v.mock ? 'aiFlow.screen.footerMock' : 'aiFlow.screen.footer') | wcT }}</p>
           </footer>
         </section>
       </div>
@@ -164,19 +165,25 @@
     <div class="wcf__diagram wcf__diagram--db" *ngIf="flowService.ui.mode === 'db'">
       <div class="wcf-db__state" *ngIf="flowService.ui.dbStatus === 'loading' || flowService.ui.dbStatus === 'idle'" role="status" aria-live="polite">
         <span class="wcf-pulse" aria-hidden="true"><span></span><span></span><span></span></span>
-        <p>{{ 'aiFlow.db.loading' | wcT }}</p>
+        <p>{{ (flowService.ui.dbDeep ? 'aiFlow.db.loadingDeep' : 'aiFlow.db.loading') | wcT }}</p>
+        <p class="wcf-db__progress" *ngIf="flowService.ui.dbProgress">{{ flowService.ui.dbProgress }}</p>
+        <div class="wcf-db__actions" *ngIf="flowService.ui.dbDeep">
+          <button type="button" class="wcf-btn wcf-btn--ghost" (click)="flowService.cancelDbMap()">{{ 'aiFlow.db.cancel' | wcT }}</button>
+        </div>
       </div>
       <div class="wcf-db__state is-error" *ngIf="flowService.ui.dbStatus === 'error'" role="alert">
         <i class="bi bi-exclamation-octagon" aria-hidden="true"></i>
         <p>{{ flowService.ui.dbError || ('aiFlow.db.failed' | wcT) }}</p>
         <div class="wcf-db__actions">
-          <button type="button" class="wcf-btn" (click)="flowService.loadDbMap(true)"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>{{ 'ai.retry' | wcT }}</button>
+          <button type="button" class="wcf-btn" (click)="flowService.retryDbMap()"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>{{ 'ai.retry' | wcT }}</button>
         </div>
+        <p class="wcf-db__hint">{{ 'aiFlow.db.retryHint' | wcT }}</p>
       </div>
       <div class="wcf-db__state" *ngIf="flowService.ui.dbStatus === 'empty'">
         <i class="bi bi-database" aria-hidden="true"></i>
         <p>{{ 'aiFlow.db.empty' | wcT }}</p>
-        <button type="button" class="wcf-btn" (click)="flowService.loadDbMap(true)"><i class="bi bi-arrow-repeat" aria-hidden="true"></i>{{ 'aiFlow.db.refresh' | wcT }}</button>
+        <button type="button" class="wcf-btn" (click)="flowService.retryDbMap()"><i class="bi bi-arrow-clockwise" aria-hidden="true"></i>{{ 'ai.retry' | wcT }}</button>
+        <p class="wcf-db__hint">{{ 'aiFlow.db.retryHint' | wcT }}</p>
       </div>
       <ng-container *ngIf="flowService.ui.dbStatus === 'ready' && flowService.dbView as v">
         <div class="wcf-db__bar">

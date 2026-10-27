@@ -16,6 +16,7 @@ import { ACTOR_API, DbExplainScript, DbExplainStep } from '../workspace-code-db/
 type Translate = (key: string, params?: Record<string, string | number>) => string;
 
 const DB_TEXT = /(Repository|Repo|Dao|Mapper|EntityManager|JdbcTemplate|Jpa|Query|Entity)\b|\bfindBy|\bsave(All|AndFlush)?\b|\bdelete(By)?\b|\b(SELECT|INSERT|UPDATE)\b/i;
+const DB_FILE = /(repositor|dao|mapper|entit|model|persist|jdbc|sql|query|store)/i;
 const REPOSITORY_GENERIC = /(?:Jpa|Crud|PagingAndSorting|Mongo)?Repository<\s*(\w+)\s*,/g;
 const TABLE_ANNOTATION = /@Table\s*\(\s*(?:name\s*=\s*)?"([\w$.]+)"/g;
 const SQL_TABLE = /\b(?:FROM|INTO|UPDATE|JOIN)\s+[`"[]?([A-Za-z_][\w$]*)/gi;
@@ -52,6 +53,29 @@ export function dbStepIndexes(flow: FlowDiagram): number[] {
     out.add(i);
   });
   return [...out].sort((a, b) => a - b).slice(0, MAX_DB_STEPS);
+}
+
+/**
+ * Archivos de acceso a datos de partida del reintento profundo (como mucho `max`, sin duplicados por `mountId|file`): refs de los
+ * pasos de datos, refs de sus pasos anteriores y archivos del flujo que parecen repositorios, entidades, mappers o SQL.
+ */
+export function dbSourceSeeds(flow: FlowDiagram, max = 8): { mountId: string; file: string; line: number }[] {
+  const out: { mountId: string; file: string; line: number }[] = [];
+  const seen = new Set<string>();
+  const add = (ref: { mountId: string; file: string; line: number } | null | undefined): void => {
+    if (!ref || !ref.file || out.length >= max) return;
+    const key = `${ref.mountId}|${ref.file}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ mountId: ref.mountId, file: ref.file, line: ref.line >= 1 ? ref.line : 1 });
+  };
+  const dbSteps = flow.steps.filter((s) => isDbStep(flow, s));
+  dbSteps.forEach((s) => add(s.ref));
+  dbStepIndexes(flow).forEach((i) => add(flow.steps[i].ref));
+  for (const ref of flow.files) {
+    if (DB_FILE.test(ref.file) || /\.(sql|xml)$/i.test(ref.file)) add(ref);
+  }
+  return out;
 }
 
 /** Entidades de los repositorios genéricos (`JpaRepository<User, Long>` → `User`), como mucho 4. */

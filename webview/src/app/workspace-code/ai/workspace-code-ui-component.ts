@@ -4,6 +4,9 @@
  * el texto que se envía a la IA cuando hay que recortar.
  */
 
+/** Plantillas o vistas de cualquier tecnología (JSP, Thymeleaf, JSX/TSX, Vue, Razor, PHP, Twig, FreeMarker…) que pinta una pantalla. */
+export const VIEW_TEMPLATE_RE = /\.(?:html?|xhtml|jspx?|jspf|tagx?|vue|jsx|tsx|svelte|astro|cshtml|razor|vbhtml|aspx|ascx|php|phtml|twig|ftlh?|vm|hbs|handlebars|mustache|ejs|pug|jade|erb|haml|slim|liquid|njk|gsp|jinja2?|j2|tpl)$/i;
+
 export interface ComponentMeta {
   className: string;
   selector: string;

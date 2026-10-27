@@ -72,7 +72,7 @@ En el ejemplo, una contraseña incorrecta en FreeSocial no termina en un aviso d
 
 <p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/vista-previa.webp" alt="Visualizar pantalla del componente de login, antes y con el cambio" width="900"></p>
 
-Desde el menú de cualquier paso (pasa el ratón por su número) elige **Visualizar pantalla**. Traza reconstruye el componente real (plantilla y estilos) y marca lo que ve el usuario en ese escenario. Si hay un cambio propuesto, alterna entre **Ahora** y **Con el cambio**.
+Desde el menú de cualquier paso (pasa el ratón por su número) elige **Visualizar pantalla**. En Angular, Traza reconstruye el componente real (plantilla y estilos). Con cualquier otra tecnología de vistas (JSP, Thymeleaf, HTML, React, Vue, Razor, PHP, Twig…), la IA busca la vista del paso con sus includes, layouts y estilos, y devuelve una maqueta estática. Las tablas y los datos dinámicos se rellenan con datos de ejemplo inventados: solo sirve para visualizar y no modifica nada. En los dos casos se marca lo que ve el usuario en ese escenario. Si hay un cambio propuesto, alterna entre **Ahora** y **Con el cambio**.
 
 ### 📜 Analizar logs
 
@@ -86,6 +86,8 @@ Pega los logs del navegador o del servidor y pulsa **Analizar logs**. Traza cruz
 
 Si el flujo toca la base de datos, esta pestaña se prepara sola en segundo plano en cuanto se abre el flujo, así que al entrar ya está dibujada. También se reutiliza al reabrir el flujo. El diagrama de tablas se recorre al ritmo del flujo. En cada acceso ves la operación (`SELECT`, `UPDATE`…), las columnas y de dónde sale cada valor (`email ← usuarioDTO.email`), con la explicación del paso junto a su tabla. Sin conexión, se deduce de las entidades y del código. Con una conexión configurada se usa **el esquema real**, del que solo se lee la metadata.
 
+Si el mapa no se puede generar o sale vacío, **Reintentar** hace una búsqueda más profunda. La IA lee las clases de acceso a datos del flujo (repositorios, DAO, mappers, entidades) y localiza sus sentencias SQL (`@Query`, JdbcTemplate, MyBatis, archivos `.sql`…). A partir de ellas deduce las tablas, las columnas y las relaciones que hay que pintar.
+
 ### 🔀 Simular cambios
 
 <p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/simular-cambios.webp" alt="Simular antes y después de un cambio propuesto" width="900"></p>
@@ -98,7 +100,7 @@ A la izquierda, el diff del cambio propuesto. A la derecha, **Simular cambios** 
 
 ### En el chat: `@traza`
 
-- `@traza ¿cómo funciona el registro?` (o `@traza /flujo …`): genera el flujo y abre el panel.
+- `@traza ¿cómo funciona el registro?` (o `@traza /flujo …`): genera el flujo y abre el panel. En el chat, la IA responde a tu pregunta con un texto y debajo aparece el recorrido resumido, una sola vez.
 - `@traza ¿qué ocurre si pongo una contraseña incorrecta?`: si la pregunta plantea un escenario, el chat muestra un resumen del escenario (qué ve el usuario, en qué paso y archivo falla, conclusión), una lista corta de pasos y el botón **Visualizar flujo**, que reabre ese flujo concreto (de los 10 últimos de la sesión). Traza busca en las carpetas que tengas abiertas en VS Code en ese momento; si la pregunta nombra una de ellas («… en *&lt;carpeta&gt;*»), solo usa esa.
 - `@traza /cambio valida que el email no esté vacío`: propone un cambio sobre el flujo abierto y lo lleva a **Simular cambios**.
 - Los archivos que adjuntes con `#archivo` se usan como pista prioritaria.
@@ -185,7 +187,9 @@ Esto consume cuota o *premium requests* de tu proveedor:
 
 - **Generar un flujo o proponer un cambio:** la IA investiga en varias rondas (como máximo unas 14 rondas, 40 búsquedas y lecturas, o 2 minutos y medio).
 - **Respuesta con un formato que no se puede dibujar:** se vuelve a pedir hasta 2 veces más.
-- **Flujo que toca la base de datos:** una llamada más para precargar esa pestaña.
+- **Respuesta en el chat:** unas rondas más para que la IA conteste a tu pregunta con texto.
+- **Flujo que toca la base de datos:** una llamada más para precargar esa pestaña. **Reintentar** lanza una investigación de varias rondas.
+- **Visualizar pantalla sin Angular:** la IA busca la vista en varias rondas.
 - **Simular cambios:** dos llamadas por escenario (hasta 14).
 
 Las respuestas se guardan en caché 15 minutos.

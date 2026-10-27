@@ -178,6 +178,28 @@ export interface UiPreviewPlan {
   after?: Omit<UiPreviewPlan, 'after'>;
 }
 
+/**
+ * Maqueta de pantalla de la IA (UI_MOCK): HTML + CSS estáticos de la vista del paso, con datos de ejemplo inventados.
+ * Se sanea y se pinta solo en el iframe sandbox. Nunca se modifica ningún archivo.
+ */
+export interface UiMockBody {
+  /** Solo el contenido de `<body>`, ya renderizado. */
+  html: string;
+  css?: string;
+  root?: string;
+  state: UiPreviewState;
+  mark: { selector: string; label: string };
+  caption: string;
+}
+
+export interface UiMock extends UiMockBody {
+  css: string;
+  /** «carpeta/ruta» de la plantilla principal que usó la IA. */
+  view?: string;
+  /** Solo si hay cambio propuesto: la misma pantalla con el cambio. */
+  after?: UiMockBody;
+}
+
 /* ============================================================
  *  Mapa de datos del flujo (modo «Base de datos», DB_MAP)
  * ============================================================ */
@@ -252,6 +274,9 @@ export interface FlowDbMapContext {
     tables: { name: string; columns: { name: string; type: string; pk: boolean; nullable: boolean }[]; fks: { columns: string[]; refTable: string; refColumns: string[] }[] }[];
     otherTables: string[];
   } | null;
+  /** Solo en el reintento profundo (`db-map-sql`): archivos de acceso a datos de partida (el host los lee) y motivo del reintento. */
+  seeds?: { mountId: string; file: string; line: number }[];
+  reason?: 'failed' | 'empty';
 }
 
 /** Archivo enviado como contexto (ruta del proyecto y contenido ya enmascarado). */
@@ -284,6 +309,18 @@ export interface UiPlanContext {
     summary: string;
     files: { path: string; status: string; hunks: { oldStart: number; newStart: number; lines: { kind: string; text: string }[] }[] }[];
   } | null;
+}
+
+/** JSON que viaja en base64 (`contextBase64`) en la llamada UI_MOCK. */
+export interface UiMockContext {
+  flowId: string;
+  question: string;
+  screen: { index: number; id: string; title: string; label: string; what: string; kind: string | null };
+  /** `ref` = «mountId/file:line». */
+  steps: { index: number; label: string; title: string; ref: string | null; ui: string | null }[];
+  seeds: { mountId: string; file: string; line: number }[];
+  simulation: UiPlanContext['simulation'];
+  change: (NonNullable<UiPlanContext['change']> & { applied: boolean }) | null;
 }
 
 export interface FlowDiagnosis {
@@ -471,6 +508,10 @@ export interface FlowUiState {
   dbErrorAction: 'claudePanel' | null;
   /** El mapa lo está resolviendo Claude (la carga muestra «Cancelar»). */
   dbClaude: boolean;
+  /** Reintento profundo (`db-map-sql`) en curso: la IA lee el código con herramientas. */
+  dbDeep: boolean;
+  /** Último mensaje de progreso del reintento profundo (≤ 100 caracteres). */
+  dbProgress: string | null;
 }
 
 /** Conversación guardada en `localStorage` (solo mensajes y metadatos de las chips). */

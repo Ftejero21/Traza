@@ -10,11 +10,11 @@ import * as vscode from 'vscode';
 import type { ChangeCompareBody, FlowDiagnosisResponse, FlowKind, FlowRequestBody, NexoLanguage } from '../webview/src/app/bridge/protocol';
 import { maskConfigSecrets, maskSensitiveJson, maskSensitiveText } from '../webview/src/app/workspace-code/ai/workspace-code-ai-mask';
 import { afterWindows, PatchError, type ChangeFile, type CodeWindow } from './ai/change-patcher';
-import { systemFor, type PromptOp } from './ai/prompts';
+import { ANSWER_BUDGET_NOTE, ANSWER_CONTINUE_NOTE, ANSWER_EMPTY_NOTE, ANSWER_SYSTEM, answerNote, systemFor, type PromptOp } from './ai/prompts';
 import { clampToSchema, compactSchema, validate } from './ai/schema-validator';
 import {
   changeDiff, cut, cutCss, dbMapErrors, dropInvalidScenario, flowSemantics, isObj, numbered, parseModelJson, proposeSemantics,
-  repairDbMap, repairDiagnosis, repairUiPlan, txt, uiPlanErrors,
+  repairDbMap, repairDiagnosis, repairUiMock, repairUiPlan, txt, uiMockErrors, uiPlanErrors,
 } from './ai/semantics';
 import { AGENT_TOOLS, AgentToolSession } from './host-agent-tools';
 import { collectFlowContext, type ContextFragment, type FlowContext, type FolderRole, type PinnedRef } from './host-context';
@@ -57,6 +57,15 @@ const MAX_RETRY_ASSISTANT_CHARS = 40_000;
 const DEFAULT_MAX_INPUT_TOKENS = 64_000;
 const TOKEN_BUDGET_RATIO = 0.8;
 const CHARS_PER_TOKEN = 3;
+const MAX_ANSWER_CHARS = 12_000;
+/** Fase de respuesta con herramientas: rondas, llamadas, tiempo de investigación (la ronda final sin herramientas va aparte) y texto retenido antes de mostrarlo. */
+const ANSWER_MAX_ROUNDS = 6;
+const ANSWER_MAX_CALLS = 20;
+const ANSWER_TIME_MS = 60_000;
+const ANSWER_HOLD_CHARS = 400;
+const ANSWER_SEED_MAX = 2;
+const ANSWER_SEED_TTL_MS = 10 * 60_000;
+const ANSWER_DATA_CHARS = 40_000;
 const CACHE_MAX = 50;
 const CACHE_TTL_MS = 15 * 60_000;
 const COMPARE_CONCURRENCY = 3;
@@ -99,6 +108,16 @@ const MAX_UI_SIMULATION_JSON = 20_000;
 const MAX_UI_CHANGE_JSON = 40_000;
 const MAX_UI_NAME = 200;
 const UI_PLAN_GLOBAL_CSS_AI_CHARS = 12_000;
+const MAX_UI_MOCK_INPUT_CHARS = 80_000;
+const MAX_UI_MOCK_SEEDS = 4;
+const MAX_UI_MOCK_STEPS = 30;
+const UI_MOCK_SEED_FILE_CHARS = 20_000;
+const UI_MOCK_SEED_LINES = 400;
+const MAX_DB_SQL_SEEDS = 8;
+const DB_SQL_SEED_LINES = 300;
+const DB_SQL_SEED_FILE_CHARS = 8_000;
+const DB_SQL_SCHEMA_CHARS = 12_000;
+const MAX_DB_SQL_INPUT_CHARS = 60_000;
 const FLOW_MAX_CONTEXT_CHARS = 110_000;
 const MAX_ACTIVE_FLOW_CHARS = 8000;
 const MAX_QUESTION_CHARS = 4000;
@@ -191,7 +210,9 @@ const FORMAT_DEFINITION: Partial<Record<PromptOp, string>> = {
   LOGS: 'LogAnalysisResult',
   PROPOSE: 'ChangeProposal',
   UI_PLAN: 'UiPreviewPlan',
+  UI_MOCK: 'UiMock',
   DB_MAP: 'FlowDbMap',
+  DB_MAP_SQL: 'FlowDbMap',
 };
 
 /** Mensaje de reintento por FORMATO: intento, rutas JSON con problema, formato esperado y petición de corregir solo eso. */
@@ -202,10 +223,26 @@ function formatFeedback(definition: string | null, errors: string[], attempt: nu
   return `${sb}\nDevuelve de nuevo el JSON completo con el mismo contenido, corrigiendo solo estas partes. Solo JSON.`;
 }
 
+/** Recibe la conversación que produjo una respuesta válida (para la respuesta en texto del chat). */
+type KeepFn = (messages: vscode.LanguageModelChatMessage[], chars: number) => void;
+
+/** Conversación (o datos) de un flujo/propuesta recién generado, para redactar la respuesta en texto del chat. Solo en memoria. */
+interface AnswerSeed {
+  kind: 'FLOW' | 'PROPOSE';
+  messages: vscode.LanguageModelChatMessage[] | null;
+  chars: number;
+  data: Obj;
+  /** Pregunta ya enmascarada. */
+  question: string;
+  lang: NexoLanguage;
+  expires: number;
+}
+
 interface RunOptions {
   model: vscode.LanguageModelChat;
   token: vscode.CancellationToken;
   language: NexoLanguage;
+  keep?: KeepFn;
   /** Tope propio de la operación (caracteres del texto de usuario), además del presupuesto de tokens. */
   maxChars?: number;
 }
@@ -240,6 +277,8 @@ export interface GenerateFlowOptions {
   useActiveEditor: boolean;
   token: vscode.CancellationToken;
   progress?: (message: string) => void;
+  /** Guarda en memoria la conversación para que `streamAnswer` redacte la respuesta en texto (solo `@traza`). */
+  keepAnswerSeed?: boolean;
 }
 
 export interface ProposeChangeOptions {
@@ -249,6 +288,7 @@ export interface ProposeChangeOptions {
   pinned?: PinnedRef[];
   token: vscode.CancellationToken;
   progress?: (message: string) => void;
+  keepAnswerSeed?: boolean;
 }
 
 export type ProposeResult = { answer: string } | { proposal: Obj; model: string };
@@ -635,6 +675,147 @@ function buildUiPlanText(input: Obj, change: Obj | null, lang: NexoLanguage): st
   return sb + idiomaTail(lang);
 }
 
+/* ------------------------------ maqueta de pantalla (UI_MOCK) ------------------------------ */
+
+interface UiMockSeedRef {
+  mountId: string;
+  file: string;
+  line: number;
+}
+
+interface UiMockInput {
+  flowId: string;
+  question: string;
+  screen: Obj;
+  steps: Obj[];
+  seeds: UiMockSeedRef[];
+  simulation: unknown;
+  change: Obj | null;
+  applied: boolean;
+}
+
+/** Cadena recortada de un campo del contexto (texto, número o vacío); más larga que `max` = contexto no válido. */
+function uiMockText(raw: unknown, max: number): string {
+  const value = (typeof raw === 'number' && Number.isFinite(raw) ? String(Math.trunc(raw)) : typeof raw === 'string' ? raw : '').trim();
+  if (value.length > max) throw new AiError(t('invalid'));
+  return value;
+}
+
+/** Semillas (archivos de partida) del contexto: lista de como máximo `max` elementos {mountId, file, line}. */
+function decodeSeeds(raw: unknown, max: number, lang: NexoLanguage = language()): UiMockSeedRef[] {
+  if (!Array.isArray(raw) || raw.length > max) throw new AiError(t('invalid', lang));
+  return raw.map((s) => {
+    if (!isObj(s) || !str(s['mountId'], 200) || !validPath(s['file'])) throw new AiError(t('invalid', lang));
+    const line = intOrNull(s['line']);
+    return { mountId: s['mountId'].trim(), file: s['file'].trim(), line: line !== null && line >= 1 ? line : 1 };
+  });
+}
+
+function decodeUiMock(ctx: Obj): UiMockInput {
+  if (json(ctx).length > MAX_UI_MOCK_INPUT_CHARS) throw new AiError(t('invalid'));
+  const flowId = validFlowId(ctx['flowId']);
+  const question = ctx['question'];
+  if (!str(question, 500)) throw new AiError(t('invalid'));
+  const rawScreen = ctx['screen'];
+  if (!isObj(rawScreen)) throw new AiError(t('invalid'));
+  const screen: Obj = {
+    index: uiMockText(rawScreen['index'], 20), id: uiMockText(rawScreen['id'], 200), title: uiMockText(rawScreen['title'], 400),
+    label: uiMockText(rawScreen['label'], 400), what: uiMockText(rawScreen['what'], 600), kind: uiMockText(rawScreen['kind'], 80),
+  };
+  const rawSteps = ctx['steps'];
+  if (!Array.isArray(rawSteps) || rawSteps.length > MAX_UI_MOCK_STEPS) throw new AiError(t('invalid'));
+  const steps: Obj[] = rawSteps.map((s) => {
+    if (!isObj(s)) throw new AiError(t('invalid'));
+    return {
+      index: uiMockText(s['index'], 20), label: uiMockText(s['label'], 400), title: uiMockText(s['title'], 400),
+      ref: uiMockText(s['ref'], MAX_PATH + 220) || null, ui: uiMockText(s['ui'], 400) || null,
+    };
+  });
+  const seeds = decodeSeeds(ctx['seeds'], MAX_UI_MOCK_SEEDS);
+  const simulation = ctx['simulation'];
+  if (!isObj(simulation) || json(simulation).length > MAX_UI_SIMULATION_JSON) throw new AiError(t('invalid'));
+  let change: unknown = ctx['change'];
+  if (change === null || change === undefined) change = null;
+  if (change !== null && (!isObj(change) || json(change).length > MAX_UI_CHANGE_JSON)) throw new AiError(t('invalid'));
+  const applied = change !== null && (change as Obj)['applied'] === true;
+  return {
+    flowId, question: maskSensitiveText(question),
+    screen: maskSensitiveJson(screen) as Obj, steps: maskSensitiveJson(steps) as Obj[], seeds,
+    simulation: maskSensitiveJson(simulation),
+    change: change === null ? null : (maskSensitiveJson(change) as Obj), applied,
+  };
+}
+
+/** Textos de la pantalla y del recorrido para el prompt de UI_MOCK, con la semilla recortada para que el total quepa en `maxChars`. */
+function buildUiMockText(input: UiMockInput, seedText: string, overview: string, lang: NexoLanguage): UserBuilder {
+  const screen = input.screen;
+  const s = (value: unknown): string => (typeof value === 'string' ? value : '');
+  return (maxChars) => {
+    let sb = `## PANTALLA A VISUALIZAR\npaso: P${s(screen['index'])}\ntitulo: ${s(screen['title'])}\netiqueta: ${s(screen['label'])}\n`;
+    sb += `lo que ve el usuario: ${s(screen['what']) || s(screen['kind']) || '(sin descripcion)'}\npregunta: ${input.question}\n\n`;
+    sb += '## RECORRIDO HASTA LA PANTALLA\n';
+    if (!input.steps.length) sb += '(sin pasos)\n';
+    for (const step of input.steps) {
+      const title = s(step['title']) ? ` · ${s(step['title'])}` : '';
+      const ref = s(step['ref']) ? ` · ${s(step['ref'])}` : '';
+      const ui = s(step['ui']) ? ` · ui: ${s(step['ui'])}` : '';
+      sb += `- P${s(step['index'])} ${s(step['label'])}${title}${ref}${ui}\n`;
+    }
+    sb += `\n## RESULTADO DE LA SIMULACION\n${json(input.simulation)}\n\n`;
+    const changeText = changeDiff(input.change);
+    if (changeText !== null) sb += `## CAMBIO PROPUESTO (aplicado: ${input.applied ? 'sí' : 'no'})\n${changeText}\n\n`;
+    sb += `## CARPETAS DEL WORKSPACE\n${overview || '(sin datos)'}\n\n`;
+    const tail = idiomaTail(lang);
+    const head = '## ARCHIVOS DE PARTIDA\n';
+    const room = maxChars - sb.length - head.length - tail.length - 2;
+    let seed = seedText.trim() || '(ninguno)';
+    if (seed.length > room) seed = room > TRUNC.length ? seed.slice(0, room - TRUNC.length) + TRUNC : '';
+    return `${sb}${head}${seed}\n\n${tail}`;
+  };
+}
+
+/* ------------------------------ mapa de datos (DB_MAP / DB_MAP_SQL) ------------------------------ */
+
+/** Esquema real de la conexión (opcional): validado y enmascarado; `empty` = sin conexión. */
+function decodeDbSchema(ctx: Obj, lang: NexoLanguage): { schema: unknown; empty: boolean } {
+  let schema = ctx['schema'];
+  if (schema === undefined || schema === null) schema = {};
+  else if (!isObj(schema) || json(schema).length > MAX_DB_SCHEMA_CHARS) throw new AiError(t('invalid', lang));
+  else schema = maskSensitiveJson(schema);
+  const empty = !isObj(schema) || !Object.keys(schema).length;
+  return { schema, empty };
+}
+
+/** Validación del `FlowDbMap`: esquema JSON, reparación contra el flujo y comprobaciones semánticas. */
+function dbMapCheck(flow: Obj): (raw: Obj) => Validation {
+  return (raw) => {
+    // Algunos modelos envuelven la respuesta con el nombre de la definición: {"FlowDbMap": {...}}.
+    const wrapped = raw['FlowDbMap'];
+    const root = Object.keys(raw).length === 1 && isObj(wrapped) ? { ...wrapped } : raw;
+    clampToSchema('FlowDbMap', root);
+    const errors = validate('FlowDbMap', root);
+    if (errors.length) return { errors };
+    repairDbMap(root, flow);
+    return { errors: dbMapErrors(root, flow), value: root };
+  };
+}
+
+/** Texto del reintento profundo del mapa de datos, con la semilla recortada para que el total quepa en `maxChars`. */
+function buildDbSqlText(flow: Obj, reason: 'failed' | 'empty', schemaText: string, seedText: string, overview: string, lang: NexoLanguage): UserBuilder {
+  return (maxChars) => {
+    let sb = `## FLUJO\n${json(flow)}\n\n`;
+    sb += `## MOTIVO DEL REINTENTO\n${reason === 'empty' ? 'El mapa anterior salió vacío o sin tablas pintables.' : 'El mapa anterior no se pudo generar.'}\n\n`;
+    sb += `## ESQUEMA REAL\n${schemaText}\n\n`;
+    sb += `## CARPETAS DEL WORKSPACE\n${overview || '(sin datos)'}\n\n`;
+    const tail = idiomaTail(lang);
+    const head = '## ARCHIVOS DE ACCESO A DATOS\n';
+    const room = maxChars - sb.length - head.length - tail.length - 2;
+    let seed = seedText.trim() || '(ninguno)';
+    if (seed.length > room) seed = room > TRUNC.length ? seed.slice(0, room - TRUNC.length) + TRUNC : '';
+    return `${sb}${head}${seed}\n\n${tail}`;
+  };
+}
+
 /* ------------------------------ explicación de tabla ------------------------------ */
 
 function addText(set: Set<string>, value: unknown): void {
@@ -690,6 +871,8 @@ export class HostAi {
   private readonly recent = new Map<string, GeneratedFlow>();
   /** Propuestas de cambio por flujo (máx. 10 por flujo, solo en memoria), para reabrir «Simular cambios». */
   private readonly proposals = new Map<string, Obj[]>();
+  /** Semillas para la respuesta en texto del chat (máx. 2, 10 min, se consumen al usarse; nunca se persisten). */
+  private readonly answerSeeds = new Map<string, AnswerSeed>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -942,7 +1125,11 @@ export class HostAi {
     throw new AiError(`${t('failed', lang)} ${error instanceof Error ? cut(error.message || '', 200) : ''}`.trim());
   }
 
-  /** Como `call`, pero con herramientas: devuelve el texto y las llamadas a herramientas del stream de la respuesta. */
+  /**
+   * Como `call`, pero con herramientas: devuelve el texto y las llamadas a herramientas del stream de la respuesta.
+   * Con `onText` se avisa de cada fragmento de texto (además de acumularlo); si devuelve `false`, se corta el stream y
+   * se devuelve lo acumulado sin error (salvo cancelación del usuario).
+   */
   private async callTools(
     model: vscode.LanguageModelChat,
     messages: vscode.LanguageModelChatMessage[],
@@ -950,10 +1137,15 @@ export class HostAi {
     token: vscode.CancellationToken,
     lang: NexoLanguage,
     allowEmpty = false,
+    onText?: (chunk: string) => boolean | void,
   ): Promise<{ text: string; calls: vscode.LanguageModelToolCallPart[]; other: number }> {
     const cts = new vscode.CancellationTokenSource();
     const link = linked(token, cts);
     let timedOut = false;
+    let stopped = false;
+    let text = '';
+    const calls: vscode.LanguageModelToolCallPart[] = [];
+    let other = 0;
     const timer = setTimeout(() => {
       timedOut = true;
       cts.cancel();
@@ -966,15 +1158,17 @@ export class HostAi {
         ...(tools ? { tools, toolMode: vscode.LanguageModelChatToolMode.Auto } : {}),
       };
       const response = await model.sendRequest(messages, options, cts.token);
-      let text = '';
-      const calls: vscode.LanguageModelToolCallPart[] = [];
-      let other = 0;
       for await (const part of response.stream) {
         if (part instanceof vscode.LanguageModelTextPart) {
           text += part.value;
           if (text.length > MAX_RESPONSE_CHARS) {
             cts.cancel();
             throw new AiError(t('tooLarge', lang));
+          }
+          if (onText && onText(part.value) === false) {
+            stopped = true;
+            cts.cancel();
+            break;
           }
         } else if (part instanceof vscode.LanguageModelToolCallPart) {
           calls.push(part);
@@ -985,6 +1179,7 @@ export class HostAi {
       if (!allowEmpty && !text.trim() && !calls.length) throw new AiError(t('empty', lang).replace('{model}', modelLabel(model)));
       return { text, calls, other };
     } catch (error: unknown) {
+      if (stopped && !token.isCancellationRequested) return { text, calls, other };
       return this.modelFailure(error, timedOut, token, cts, lang);
     } finally {
       clearTimeout(timer);
@@ -1012,8 +1207,19 @@ export class HostAi {
     const { model, token, language: lang } = opts;
     const user = await this.fitUser(model, system, build, opts.maxChars ?? Number.MAX_SAFE_INTEGER, token);
     const key = sha256(`${op}|${model.id}|${lang}|${system}|${user}`);
+    const keepValue = (value: unknown): void => {
+      if (!opts.keep) return;
+      const text = json(value);
+      opts.keep([
+        vscode.LanguageModelChatMessage.User(system), vscode.LanguageModelChatMessage.User(user),
+        vscode.LanguageModelChatMessage.Assistant(cut(text, MAX_RETRY_ASSISTANT_CHARS)),
+      ], system.length + user.length + Math.min(text.length, MAX_RETRY_ASSISTANT_CHARS));
+    };
     const hit = this.cacheGet(key);
-    if (hit !== undefined) return { value: hit, cached: true };
+    if (hit !== undefined) {
+      keepValue(hit);
+      return { value: hit, cached: true };
+    }
 
     const messages = [vscode.LanguageModelChatMessage.User(system), vscode.LanguageModelChatMessage.User(user)];
     const attempt = async (msgs: vscode.LanguageModelChatMessage[]): Promise<{ text: string; result: Validation }> => {
@@ -1044,13 +1250,28 @@ export class HostAi {
       ({ text, result } = await attempt(retry));
     }
     this.cachePut(key, result.value);
+    keepValue(result.value);
     return { value: result.value, cached: false };
+  }
+
+  /** Lee (solo lectura, enmascarado) los archivos de partida; los que no se encuentran van como pista de búsqueda. */
+  private async readSeeds(session: AgentToolSession, seeds: UiMockSeedRef[], maxLines: number, maxChars: number): Promise<string> {
+    let sb = '';
+    for (const seed of seeds) {
+      const path = session.pathFor(seed.mountId, seed.file);
+      if (path) {
+        sb += `${await session.invoke('traza_read', { path, startLine: 1, endLine: maxLines }, maxChars)}\n\n`;
+      } else {
+        sb += `- ${seed.mountId ? `${seed.mountId}/` : ''}${seed.file}:${seed.line} (no encontrado: búscalo)\n`;
+      }
+    }
+    return sb;
   }
 
   /* ------------------------------ webview: flow ------------------------------ */
 
   /** Simular, analizar logs, plan de pantalla y mapa de datos (`FlowDiagnosisResponse`). */
-  async flowRequest(id: string, kind: FlowKind, body: FlowRequestBody): Promise<FlowDiagnosisResponse> {
+  async flowRequest(id: string, kind: FlowKind, body: FlowRequestBody, progress?: (message: string) => void): Promise<FlowDiagnosisResponse> {
     const lang = body.language === 'en' ? 'en' : 'es';
     const cts = this.begin(id);
     try {
@@ -1095,35 +1316,144 @@ export class HostAi {
         const user = buildUiPlanText(ui.input, ui.change, lang);
         if (user.length > MAX_UI_PROMPT_CHARS) throw new AiError(t('uiTooLarge', lang));
         operation = 'UI_PLAN';
-        run = await this.runJson('UI_PLAN', systemFor('UI_PLAN'), () => user, (root) => {
-          clampToSchema('UiPreviewPlan', root);
-          repairUiPlan(root);
-          const errors = validate('UiPreviewPlan', root);
-          return { errors: errors.length ? errors : uiPlanErrors(root) };
-        }, opts);
+        const planFlowId = typeof ctx['flowId'] === 'string' ? ctx['flowId'].slice(0, 64) : '?';
+        const t0 = Date.now();
+        try {
+          run = await this.runJson('UI_PLAN', systemFor('UI_PLAN'), () => user, (root) => {
+            clampToSchema('UiPreviewPlan', root);
+            repairUiPlan(root);
+            const errors = validate('UiPreviewPlan', root);
+            return { errors: errors.length ? errors : uiPlanErrors(root) };
+          }, opts);
+          trazaLog().info(`UI_PLAN · flujo=${planFlowId} · listo · cached=${run.cached} · ${Date.now() - t0} ms`);
+        } catch (error) {
+          trazaLog().warn(`UI_PLAN · ${isCancelled(error) ? 'cancelado' : 'error'} · ${Date.now() - t0} ms`);
+          throw error;
+        }
+      } else if (kind === 'ui-mock') {
+        const mock = decodeUiMock(ctx);
+        operation = 'UI_MOCK';
+        const mockFlowId = mock.flowId.slice(0, 64);
+        const agentic = this.agentCapable(model);
+        const t0 = Date.now();
+        trazaLog().info(`UI_MOCK · flujo=${mockFlowId} · paso=P${String(mock.screen['index'] ?? '')} · inicio · semillas=${mock.seeds.length} · cambio=${mock.change ? 'sí' : 'no'} · agente=${agentic ? 'sí' : 'no'}`);
+        const check = (raw: Obj): Validation => {
+          // Algunos modelos envuelven la respuesta con el nombre de la definición: {"UiMock": {...}}.
+          const wrapped = raw['UiMock'];
+          const root: Obj = Object.keys(raw).length === 1 && isObj(wrapped) ? { ...wrapped } : raw;
+          if (root['after'] === null) delete root['after'];
+          clampToSchema('UiMock', root);
+          repairUiMock(root);
+          const errors = validate('UiMock', root);
+          return { errors: errors.length ? errors : uiMockErrors(root), value: root };
+        };
+        let seedText = '';
+        let overview = '';
+        try {
+          let value: unknown = null;
+          let mode = 'clásico';
+          if (agentic) {
+            value = await this.runAgent({
+              op: 'UI_MOCK', model, token: cts.token, lang, progress,
+              seed: async (session): Promise<FlowContext> => {
+                seedText = await this.readSeeds(session, mock.seeds, UI_MOCK_SEED_LINES, UI_MOCK_SEED_FILE_CHARS);
+                overview = session.overview();
+                return { mounts: [], mapText: '', fragments: [] };
+              },
+              build: () => buildUiMockText(mock, seedText, overview, lang),
+              check,
+            });
+            if (value !== null) mode = 'agente';
+          }
+          let cached = false;
+          if (value === null) {
+            const session = new AgentToolSession({ token: cts.token, lang, progress });
+            await session.init();
+            seedText = await this.readSeeds(session, mock.seeds, UI_MOCK_SEED_LINES, UI_MOCK_SEED_FILE_CHARS);
+            overview = session.overview();
+            progress?.(lang === 'en' ? 'Building the screen mockup…' : 'Maquetando la pantalla…');
+            const classic = await this.runJson('UI_MOCK', systemFor('UI_MOCK'), buildUiMockText(mock, seedText, overview, lang), check, { ...opts, maxChars: MAX_UI_MOCK_INPUT_CHARS });
+            value = classic.value;
+            cached = classic.cached;
+          }
+          run = { value, cached };
+          const result = value as Obj;
+          const sizeOf = (v: unknown): number => (typeof v === 'string' ? v.length : 0);
+          trazaLog().info(`UI_MOCK · listo · modo=${mode} · cached=${cached} · html=${sizeOf(result['html'])} css=${sizeOf(result['css'])} · after=${isObj(result['after']) ? 'sí' : 'no'} · ${Date.now() - t0} ms`);
+        } catch (error) {
+          trazaLog().warn(`UI_MOCK · ${isCancelled(error) ? 'cancelado' : 'error'} · ${Date.now() - t0} ms`);
+          throw error;
+        }
+      } else if (kind === 'db-map-sql') {
+        const d = decodeDiagnosis(ctx);
+        const { schema, empty } = decodeDbSchema(ctx, lang);
+        const seeds = decodeSeeds(ctx['seeds'], MAX_DB_SQL_SEEDS, lang);
+        const reason: 'failed' | 'empty' = ctx['reason'] === 'empty' ? 'empty' : 'failed';
+        const schemaText = empty ? '(sin conexion)' : cut(json(schema), DB_SQL_SCHEMA_CHARS);
+        operation = 'DB_MAP_SQL';
+        const sqlFlowId = d.flowId.slice(0, 64);
+        const agentic = this.agentCapable(model);
+        const t0 = Date.now();
+        trazaLog().info(`DB_MAP_SQL · flujo=${sqlFlowId} · inicio · semillas=${seeds.length} · motivo=${reason} · esquema=${empty ? 'código' : 'real'} · agente=${agentic ? 'sí' : 'no'}`);
+        const base = dbMapCheck(d.flow);
+        const check = (raw: Obj): Validation => {
+          const result = base(raw);
+          if (result.errors.length) return result;
+          const map = result.value as Obj;
+          const tables = map['tables'];
+          const accesses = map['accesses'];
+          if (!Array.isArray(tables) || !tables.length || !Array.isArray(accesses) || !accesses.length) {
+            return { errors: ['$.tables/$.accesses: vacío; Traza necesita al menos una tabla y un acceso de un paso del FLUJO: localiza las sentencias SQL o las entidades'] };
+          }
+          return result;
+        };
+        let seedText = '';
+        let overview = '';
+        try {
+          let value: unknown = null;
+          let mode = 'clásico';
+          if (agentic) {
+            value = await this.runAgent({
+              op: 'DB_MAP_SQL', model, token: cts.token, lang, progress,
+              seed: async (session): Promise<FlowContext> => {
+                seedText = await this.readSeeds(session, seeds, DB_SQL_SEED_LINES, DB_SQL_SEED_FILE_CHARS);
+                overview = session.overview();
+                return { mounts: [], mapText: '', fragments: [] };
+              },
+              build: () => buildDbSqlText(d.flow, reason, schemaText, seedText, overview, lang),
+              check,
+            });
+            if (value !== null) mode = 'agente';
+          }
+          let cached = false;
+          if (value === null) {
+            const session = new AgentToolSession({ token: cts.token, lang, progress });
+            await session.init();
+            seedText = await this.readSeeds(session, seeds, DB_SQL_SEED_LINES, DB_SQL_SEED_FILE_CHARS);
+            overview = session.overview();
+            progress?.(lang === 'en' ? 'Building the data map…' : 'Construyendo el mapa de datos…');
+            const classic = await this.runJson('DB_MAP_SQL', systemFor('DB_MAP_SQL'), buildDbSqlText(d.flow, reason, schemaText, seedText, overview, lang), check, { ...opts, maxChars: MAX_DB_SQL_INPUT_CHARS });
+            value = classic.value;
+            cached = classic.cached;
+          }
+          run = { value, cached };
+          const result = value as Obj;
+          const count = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
+          trazaLog().info(`DB_MAP_SQL · listo · modo=${mode} · cached=${cached} · tablas=${count(result['tables'])} · relaciones=${count(result['relations'])} · accesos=${count(result['accesses'])} · ${Date.now() - t0} ms`);
+        } catch (error) {
+          trazaLog().warn(`DB_MAP_SQL · ${isCancelled(error) ? 'cancelado' : 'error'} · ${Date.now() - t0} ms`);
+          throw error;
+        }
       } else {
         const d = decodeDiagnosis(ctx);
-        let schema = ctx['schema'];
-        if (schema === undefined || schema === null) schema = {};
-        else if (!isObj(schema) || json(schema).length > MAX_DB_SCHEMA_CHARS) throw new AiError(t('invalid', lang));
-        else schema = maskSensitiveJson(schema);
-        const empty = !isObj(schema) || !Object.keys(schema).length;
+        const { schema, empty } = decodeDbSchema(ctx, lang);
         const tail = `## ESQUEMA REAL\n${empty ? '(sin conexion)' : json(schema)}\n\n${idiomaTail(lang)}`;
         operation = 'DB_MAP';
         const dbFlowId = typeof ctx['flowId'] === 'string' ? ctx['flowId'].slice(0, 64) : '?';
         const t0 = Date.now();
         trazaLog().info(`DB_MAP · flujo=${dbFlowId} · inicio · esquema=${empty ? 'código' : 'real'}`);
         try {
-        run = await this.runJson('DB_MAP', systemFor('DB_MAP'), fitCode(d.flow, d.code, null, tail), (raw) => {
-          // Algunos modelos envuelven la respuesta con el nombre de la definición: {"FlowDbMap": {...}}.
-          const wrapped = raw['FlowDbMap'];
-          const root = Object.keys(raw).length === 1 && isObj(wrapped) ? { ...wrapped } : raw;
-          clampToSchema('FlowDbMap', root);
-          const errors = validate('FlowDbMap', root);
-          if (errors.length) return { errors };
-          repairDbMap(root, d.flow);
-          return { errors: dbMapErrors(root, d.flow), value: root };
-        }, opts);
+        run = await this.runJson('DB_MAP', systemFor('DB_MAP'), fitCode(d.flow, d.code, null, tail), dbMapCheck(d.flow), opts);
         trazaLog().info(`DB_MAP · flujo=${dbFlowId} · listo · cached=${run.cached} · ${Date.now() - t0} ms`);
         } catch (error) {
           trazaLog().warn(`DB_MAP · flujo=${dbFlowId} · ${isCancelled(error) ? 'cancelado' : 'error'} · ${Date.now() - t0} ms`);
@@ -1325,7 +1655,7 @@ export class HostAi {
    * API o herramientas y ante «sin respuesta final». Cancelación y timeout se relanzan.
    */
   private async runAgent(args: {
-    op: 'FLOW' | 'PROPOSE';
+    op: 'FLOW' | 'PROPOSE' | 'UI_MOCK' | 'DB_MAP_SQL';
     model: vscode.LanguageModelChat;
     token: vscode.CancellationToken;
     lang: NexoLanguage;
@@ -1335,6 +1665,7 @@ export class HostAi {
     check: (root: Obj) => Validation | Promise<Validation>;
     /** Presupuesto de tiempo de investigación (por defecto `AGENT_TIME_MS`). */
     timeMs?: number;
+    keep?: KeepFn;
   }): Promise<unknown> {
     const { op, model, token, lang } = args;
     const log = trazaLog();
@@ -1344,7 +1675,12 @@ export class HostAi {
     let stage = 'semilla';
     const timeLimit = args.timeMs ?? AGENT_TIME_MS;
     const say = (es: string, en: string): void => args.progress?.(lang === 'en' ? en : es);
-    const sayGenerating = (): void => (op === 'FLOW' ? say('Generando el flujo…', 'Generating the flow…') : say('Proponiendo el cambio…', 'Proposing the change…'));
+    const sayGenerating = (): void => {
+      if (op === 'UI_MOCK') say('Maquetando la pantalla…', 'Building the screen mockup…');
+      else if (op === 'DB_MAP_SQL') say('Construyendo el mapa de datos…', 'Building the data map…');
+      else if (op === 'FLOW') say('Generando el flujo…', 'Generating the flow…');
+      else say('Proponiendo el cambio…', 'Proposing the change…');
+    };
     try {
       const session = new AgentToolSession({ token, lang, progress: args.progress });
       await session.init();
@@ -1363,7 +1699,9 @@ export class HostAi {
       const outOfBudget = (): boolean => rounds >= AGENT_MAX_ROUNDS - 1 || totalCalls >= AGENT_MAX_CALLS
         || Date.now() - started >= timeLimit || budget - convChars < AGENT_RESERVE_CHARS + AGENT_MIN_RESULT_CHARS;
       const finish = (end: string): void => log.info(`Agente · ${op} · rondas=${rounds} · ${session.summary()} · conversación=${convChars} · fin=${end}`);
-      say('Investigando el código en todas las carpetas…', 'Investigating the code in all folders…');
+      if (op === 'UI_MOCK') say('Buscando la vista y sus estilos…', 'Looking for the view and its styles…');
+      else if (op === 'DB_MAP_SQL') say('Buscando las sentencias SQL y las entidades…', 'Looking for the SQL statements and entities…');
+      else say('Investigando el código en todas las carpetas…', 'Investigating the code in all folders…');
       while (rounds < AGENT_MAX_ROUNDS) {
         if (token.isCancellationRequested) throw new Error('cancelled');
         if (!finishing && outOfBudget()) {
@@ -1439,6 +1777,7 @@ export class HostAi {
         }
         if (!errors.length) {
           finish(finishing ? 'presupuesto' : 'ok');
+          args.keep?.([...messages, vscode.LanguageModelChatMessage.Assistant(cut(answer, MAX_RETRY_ASSISTANT_CHARS))], convChars + Math.min(answer.length, MAX_RETRY_ASSISTANT_CHARS));
           return value;
         }
         if (fixes < AGENT_MAX_FIXES && rounds < AGENT_MAX_ROUNDS) {
@@ -1516,9 +1855,11 @@ export class HostAi {
         selectFiles: (input) => this.selectFiles(model, input, tk, lang),
       });
       let generated: unknown = null;
+      let kept = null as { messages: vscode.LanguageModelChatMessage[]; chars: number } | null;
+      const keep: KeepFn | undefined = options.keepAnswerSeed ? (messages, chars) => { kept = { messages, chars }; } : undefined;
       if (this.agentCapable(model)) {
         generated = await this.runAgent({
-          op: 'FLOW', model, token, lang, progress: options.progress,
+          op: 'FLOW', model, token, lang, progress: options.progress, ...(keep ? { keep } : {}),
           seed: (): Promise<FlowContext> => collectFlowContext({
             question: masked, pinned: options.pinned, useActiveEditor: options.useActiveEditor, token, progress: options.progress, log,
           }),
@@ -1534,7 +1875,7 @@ export class HostAi {
         const context = await classicContext(options.folder, token);
         options.progress?.(lang === 'en' ? 'Generating the flow…' : 'Generando el flujo…');
         const build = fitFlowText({ mode: 'FLOW', question: masked, context, lang, scenarioHint: options.scenario === true });
-        generated = (await this.runJson('FLOW', systemFor('FLOW'), build, flowCheck, { model, token, language: lang })).value;
+        generated = (await this.runJson('FLOW', systemFor('FLOW'), build, flowCheck, { model, token, language: lang, ...(keep ? { keep } : {}) })).value;
       }
 
       const flow: Obj = { ...(generated as Obj) };
@@ -1542,6 +1883,9 @@ export class HostAi {
       flow['model'] = modelLabel(model);
       flow['generatedAt'] = new Date().toISOString();
       flow['question'] = question;
+      if (options.keepAnswerSeed) {
+        this.saveSeed(flow['id'], { kind: 'FLOW', messages: kept?.messages ?? null, chars: kept?.chars ?? 0, data: flow, question: masked, lang, expires: 0 });
+      }
       const title = typeof flow['title'] === 'string' && flow['title'].trim() ? flow['title'].trim().slice(0, 60) : 'Sin título';
       this.last = {
         flow, title, model: modelLabel(model), scenarioAsked: options.scenario === true,
@@ -1617,9 +1961,11 @@ export class HostAi {
         return errors.length ? { errors } : { errors: [], value: { change } };
       };
       let proposed: unknown = null;
+      let kept = null as { messages: vscode.LanguageModelChatMessage[]; chars: number } | null;
+      const keep: KeepFn | undefined = options.keepAnswerSeed ? (messages, chars) => { kept = { messages, chars }; } : undefined;
       if (this.agentCapable(model)) {
         proposed = await this.runAgent({
-          op: 'PROPOSE', model, token, lang, progress: options.progress,
+          op: 'PROPOSE', model, token, lang, progress: options.progress, ...(keep ? { keep } : {}),
           seed: (): Promise<FlowContext> => collectFlowContext({
             question: masked, pinned: options.pinned ?? [], pinnedPaths, useActiveEditor: false, token, progress: options.progress, log: trazaLog(),
             prioritizeRequest: true,
@@ -1638,7 +1984,7 @@ export class HostAi {
         });
         options.progress?.(lang === 'en' ? 'Proposing the change…' : 'Proponiendo el cambio…');
         const build = fitFlowText({ mode: 'PROPOSE', question: masked, context, activeFlow, lang });
-        proposed = (await this.runJson('PROPOSE', systemFor('PROPOSE'), build, proposeCheck, { model, token, language: lang })).value;
+        proposed = (await this.runJson('PROPOSE', systemFor('PROPOSE'), build, proposeCheck, { model, token, language: lang, ...(keep ? { keep } : {}) })).value;
       }
       const value = proposed as { answer?: string; change?: Obj };
       if (typeof value.answer === 'string') return { answer: value.answer };
@@ -1650,6 +1996,9 @@ export class HostAi {
       if (cases.length) proposal['cases'] = cases;
       else delete proposal['cases'];
       proposal['createdAt'] = new Date().toISOString();
+      if (options.keepAnswerSeed) {
+        this.saveSeed(proposal['id'], { kind: 'PROPOSE', messages: kept?.messages ?? null, chars: kept?.chars ?? 0, data: proposal, question: masked, lang, expires: 0 });
+      }
       return { proposal, model: modelLabel(model) };
     } catch (error: unknown) {
       if (global.timedOut()) throw new AiError(t('timeout', lang));
@@ -1657,6 +2006,285 @@ export class HostAi {
       throw error;
     } finally {
       global.dispose();
+    }
+  }
+
+  /* ------------------------------ respuesta en texto del chat ------------------------------ */
+
+  private saveSeed(id: unknown, seed: AnswerSeed): void {
+    if (typeof id !== 'string' || !id) return;
+    const now = Date.now();
+    for (const [key, value] of this.answerSeeds) if (value.expires <= now) this.answerSeeds.delete(key);
+    this.answerSeeds.delete(id);
+    this.answerSeeds.set(id, { ...seed, expires: now + ANSWER_SEED_TTL_MS });
+    while (this.answerSeeds.size > ANSWER_SEED_MAX) {
+      const oldest = this.answerSeeds.keys().next();
+      if (oldest.done) break;
+      this.answerSeeds.delete(oldest.value);
+    }
+  }
+
+  private takeSeed(id: string): AnswerSeed | null {
+    const seed = this.answerSeeds.get(id);
+    this.answerSeeds.delete(id);
+    return seed && seed.expires > Date.now() ? seed : null;
+  }
+
+  /**
+   * Redacta en streaming la respuesta en texto del chat (`@traza`) para el flujo o la propuesta `id`. Si el modelo admite
+   * herramientas, puede investigar antes de redactar (solo lectura, mismas reglas que el agente, presupuesto acotado y una
+   * ronda final sin herramientas); si no, o si esa fase falla sin haber emitido texto con un error no fatal, vuelve a la
+   * respuesta sin herramientas. Orden de intentos: conversación del agente (si cabe en el presupuesto) y después datos del
+   * flujo. `progress` informa de la investigación y de la redacción. Sin semilla (caducada o ya usada) no llama al modelo.
+   * Cancelación y errores se relanzan; no se cachea.
+   */
+  async streamAnswer(o: {
+    id: string;
+    model?: vscode.LanguageModelChat;
+    token: vscode.CancellationToken;
+    onText: (chunk: string) => void;
+    progress?: (message: string) => void;
+  }): Promise<{ ok: boolean; chars: number }> {
+    const seed = this.takeSeed(o.id);
+    if (!seed) return { ok: false, chars: 0 };
+    const { kind, lang } = seed;
+    const log = trazaLog();
+    const started = Date.now();
+    const model = await this.resolveModel(o.model);
+    const tools = this.agentCapable(model);
+    const noteTools = answerNote(kind, seed.question, lang, true);
+    const notePlain = answerNote(kind, seed.question, lang, false);
+    const budgetChars = Math.floor((model.maxInputTokens || DEFAULT_MAX_INPUT_TOKENS) * TOKEN_BUDGET_RATIO) * CHARS_PER_TOKEN;
+    const attempts: { source: 'conversación' | 'datos'; tools: boolean }[] = [];
+    if (tools) {
+      if (seed.messages && seed.chars + noteTools.length + AGENT_RESERVE_CHARS + AGENT_MIN_RESULT_CHARS <= budgetChars) attempts.push({ source: 'conversación', tools: true });
+      attempts.push({ source: 'datos', tools: true }, { source: 'datos', tools: false });
+    } else {
+      if (seed.messages && seed.chars + notePlain.length <= budgetChars) attempts.push({ source: 'conversación', tools: false });
+      attempts.push({ source: 'datos', tools: false });
+    }
+    const resume = kind === 'FLOW'
+      ? (lang === 'en' ? 'Writing the answer…' : 'Redactando la respuesta…')
+      : (lang === 'en' ? 'Writing the explanation…' : 'Redactando la explicación…');
+    let emitted = 0;
+    const onText = (chunk: string): void => {
+      emitted += chunk.length;
+      o.onText(chunk);
+    };
+    /** Emisión con tope `MAX_ANSWER_CHARS` (corta con «…»); devuelve `false` al alcanzarlo. */
+    const emitCapped = (chunk: string): boolean => {
+      const room = MAX_ANSWER_CHARS - emitted;
+      if (chunk.length > room) {
+        if (room > 0) onText(chunk.slice(0, room));
+        onText('…');
+        emitted = MAX_ANSWER_CHARS;
+        return false;
+      }
+      onText(chunk);
+      return true;
+    };
+    for (let i = 0; i < attempts.length; i++) {
+      const attempt = attempts[i];
+      const note = attempt.tools ? noteTools : notePlain;
+      let messages: vscode.LanguageModelChatMessage[];
+      let convChars: number;
+      if (attempt.source === 'conversación' && seed.messages) {
+        messages = [...seed.messages, vscode.LanguageModelChatMessage.User(note)];
+        convChars = seed.chars + note.length;
+      } else {
+        const data = `${kind === 'FLOW' ? 'FLUJO' : 'PROPUESTA'}:\n${cut(json(stripFlow(seed.data, true)), ANSWER_DATA_CHARS)}\n\n${note}`;
+        messages = [vscode.LanguageModelChatMessage.User(ANSWER_SYSTEM), vscode.LanguageModelChatMessage.User(data)];
+        convChars = ANSWER_SYSTEM.length + data.length;
+      }
+      try {
+        let rounds = 1;
+        let summary = '';
+        let end = 'ok';
+        let chars: number;
+        if (attempt.tools) {
+          const info = await this.answerWithTools({ model, messages, convChars, token: o.token, lang, emit: emitCapped, progress: o.progress, resume });
+          chars = emitted;
+          rounds = info.rounds;
+          summary = info.summary;
+          end = info.end;
+        } else {
+          chars = await this.streamCall(model, messages, o.token, lang, onText);
+        }
+        log.info(['Respuesta', kind, `origen=${attempt.source}`, `herramientas=${attempt.tools ? 'sí' : 'no'}`, `rondas=${rounds}`, summary,
+          `${chars} caracteres`, `${Date.now() - started} ms`, `fin=${end}`].filter(Boolean).join(' · '));
+        return { ok: chars > 0, chars };
+      } catch (error: unknown) {
+        if (isCancelled(error) || o.token.isCancellationRequested) throw error;
+        const name = error instanceof Error ? error.name : 'Error';
+        const detail = logSafe(error instanceof Error ? error.message : String(error));
+        const fatal = error instanceof AiError
+          && [t('noPermissions', lang), t('blocked', lang), t('modelMissing', lang), t('timeout', lang)].includes(error.message);
+        if (i < attempts.length - 1 && emitted === 0 && !fatal) {
+          log.warn(`Respuesta · ${kind} · ${attempt.source}${attempt.tools ? '+herramientas' : ''} rechazada (${name}: ${detail}) · siguiente intento`);
+          continue;
+        }
+        log.warn(`Respuesta · ${kind} · sin respuesta (${name}: ${detail})`);
+        throw error;
+      }
+    }
+    throw new AiError(t('failed', lang));
+  }
+
+  /**
+   * Fase de respuesta con herramientas (`traza_search`/`traza_read`/`traza_list`, solo lectura, vía `AgentToolSession`):
+   * rondas acotadas (rondas, llamadas, tiempo y caracteres); la última ronda va sin herramientas. El texto que acompaña a
+   * llamadas se retiene y solo se muestra si supera `ANSWER_HOLD_CHARS`; la ronda final va en streaming directo.
+   * `emit` devuelve `false` al alcanzar el tope de la respuesta. Lanza si no se emitió ningún texto.
+   */
+  private async answerWithTools(a: {
+    model: vscode.LanguageModelChat;
+    messages: vscode.LanguageModelChatMessage[];
+    convChars: number;
+    token: vscode.CancellationToken;
+    lang: NexoLanguage;
+    emit: (chunk: string) => boolean;
+    progress?: (message: string) => void;
+    resume: string;
+  }): Promise<{ rounds: number; summary: string; end: string }> {
+    const { model, messages, token, lang } = a;
+    const session = new AgentToolSession({ token, lang, progress: a.progress });
+    await session.init();
+    const budget = Math.floor((model.maxInputTokens || DEFAULT_MAX_INPUT_TOKENS) * TOKEN_BUDGET_RATIO) * CHARS_PER_TOKEN;
+    const started = Date.now();
+    let convChars = a.convChars;
+    let rounds = 0;
+    let totalCalls = 0;
+    let finishing = false;
+    let empties = 0;
+    let emittedAny = false;
+    let end = 'presupuesto';
+    const outOfBudget = (): boolean => rounds >= ANSWER_MAX_ROUNDS - 1 || totalCalls >= ANSWER_MAX_CALLS
+      || Date.now() - started >= ANSWER_TIME_MS || budget - convChars < AGENT_RESERVE_CHARS + AGENT_MIN_RESULT_CHARS;
+    while (rounds < ANSWER_MAX_ROUNDS) {
+      if (token.isCancellationRequested) throw new Error('cancelled');
+      if (!finishing && outOfBudget()) {
+        finishing = true;
+        messages.push(vscode.LanguageModelChatMessage.User(ANSWER_BUDGET_NOTE));
+        convChars += ANSWER_BUDGET_NOTE.length;
+      }
+      rounds++;
+      let held = '';
+      let live = finishing;
+      let capped = false;
+      let roundEmitted = false;
+      const push = (chunk: string): boolean => {
+        const text = emittedAny && !roundEmitted ? `\n\n${chunk}` : chunk;
+        roundEmitted = true;
+        if (text.trim()) emittedAny = true;
+        if (a.emit(text)) return true;
+        capped = true;
+        return false;
+      };
+      const onPart = (chunk: string): boolean => {
+        if (live) return push(chunk);
+        held += chunk;
+        if (held.trim().length < ANSWER_HOLD_CHARS) return true;
+        live = true;
+        const pending = held;
+        held = '';
+        return push(pending);
+      };
+      const reply = await this.callTools(model, messages, finishing ? undefined : AGENT_TOOLS, token, lang, true, onPart);
+      if (!reply.calls.length && !reply.text.trim()) {
+        if (empties < 1) {
+          empties++;
+          messages.push(vscode.LanguageModelChatMessage.User(ANSWER_EMPTY_NOTE));
+          convChars += ANSWER_EMPTY_NOTE.length;
+          continue;
+        }
+        throw new AiError(t('empty', lang).replace('{model}', modelLabel(model)));
+      }
+      if (capped || !reply.calls.length) {
+        if (!capped && !live && held.trim()) push(held);
+        end = capped ? 'tope' : finishing ? 'presupuesto' : 'ok';
+        break;
+      }
+      messages.push(vscode.LanguageModelChatMessage.Assistant([
+        ...(reply.text ? [new vscode.LanguageModelTextPart(reply.text)] : []), ...reply.calls,
+      ]));
+      convChars += reply.text.length + reply.calls.reduce((n, call) => n + call.name.length + json(call.input).length, 0);
+      const parts: vscode.LanguageModelToolResultPart[] = [];
+      let inRound = 0;
+      let exhausted = false;
+      for (const call of reply.calls) {
+        let out: string;
+        if (finishing) {
+          out = 'omitida: investigación terminada; responde con la respuesta final';
+        } else if (inRound >= AGENT_MAX_CALLS_PER_ROUND || totalCalls >= ANSWER_MAX_CALLS) {
+          out = 'omitida: límite de llamadas';
+        } else {
+          const maxChars = Math.min(AGENT_TOOL_RESULT_CHARS, budget - convChars - AGENT_RESERVE_CHARS);
+          if (maxChars < AGENT_MIN_RESULT_CHARS) {
+            out = 'omitida: presupuesto agotado';
+            exhausted = true;
+          } else {
+            inRound++;
+            totalCalls++;
+            out = await session.invoke(call.name, call.input, maxChars);
+          }
+        }
+        convChars += out.length;
+        parts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(out)]));
+      }
+      if (!finishing && (exhausted || outOfBudget())) finishing = true;
+      // El modo «Auto» de Copilot enruta por el texto del último mensaje de usuario: sin texto falla, así que los
+      // resultados van siempre acompañados de una nota.
+      const note = finishing ? ANSWER_BUDGET_NOTE : ANSWER_CONTINUE_NOTE;
+      messages.push(vscode.LanguageModelChatMessage.User([...parts, new vscode.LanguageModelTextPart(note)]));
+      convChars += note.length;
+      a.progress?.(a.resume);
+    }
+    if (!emittedAny) throw new AiError(t('empty', lang).replace('{model}', modelLabel(model)));
+    return { rounds, summary: session.summary(), end };
+  }
+
+  /** Como `call`, pero sin herramientas y emitiendo cada fragmento de texto; tope `MAX_ANSWER_CHARS` (corta con «…»). Devuelve los caracteres emitidos. */
+  private async streamCall(
+    model: vscode.LanguageModelChat,
+    messages: vscode.LanguageModelChatMessage[],
+    token: vscode.CancellationToken,
+    lang: NexoLanguage,
+    onText: (chunk: string) => void,
+  ): Promise<number> {
+    const cts = new vscode.CancellationTokenSource();
+    const link = linked(token, cts);
+    let timedOut = false;
+    let capped = false;
+    let total = 0;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      cts.cancel();
+    }, CALL_TIMEOUT_MS);
+    try {
+      this.showNoticeOnce();
+      const response = await model.sendRequest(messages, { justification: t('justification', lang) }, cts.token);
+      for await (const chunk of response.text) {
+        const room = MAX_ANSWER_CHARS - total;
+        if (chunk.length > room) {
+          capped = true;
+          if (room > 0) onText(chunk.slice(0, room));
+          onText('…');
+          total = MAX_ANSWER_CHARS;
+          cts.cancel();
+          break;
+        }
+        total += chunk.length;
+        onText(chunk);
+      }
+      if (!total) throw new AiError(t('empty', lang).replace('{model}', modelLabel(model)));
+      return total;
+    } catch (error: unknown) {
+      if (capped && !token.isCancellationRequested) return total;
+      return this.modelFailure(error, timedOut, token, cts, lang);
+    } finally {
+      clearTimeout(timer);
+      link.dispose();
+      cts.dispose();
     }
   }
 
@@ -1723,7 +2351,7 @@ function sanitizeProposalCases(raw: unknown, flow: Obj): Obj[] {
   return out;
 }
 
-function stripFlow(flow: Obj): unknown {
+function stripFlow(flow: Obj, keepScenario = false): unknown {
   const strip = (value: unknown, depth: number): unknown => {
     if (depth > 32) return null;
     if (Array.isArray(value)) return value.map((v) => strip(v, depth + 1));
@@ -1731,7 +2359,7 @@ function stripFlow(flow: Obj): unknown {
     const out: Obj = {};
     for (const [k, v] of Object.entries(value)) {
       if (k === 'codeSnapshot' || k === 'verification') continue;
-      if (depth === 0 && (k === 'dbMap' || k === 'scenario')) continue;
+      if (depth === 0 && (k === 'dbMap' || (k === 'scenario' && !keepScenario))) continue;
       out[k] = strip(v, depth + 1);
     }
     return out;

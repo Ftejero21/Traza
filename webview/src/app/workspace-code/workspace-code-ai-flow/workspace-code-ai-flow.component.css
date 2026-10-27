@@ -449,6 +449,8 @@
 .wcf-db__state.is-error > .bi { color: var(--wce-danger); }
 .wcf-db__state.is-error p { color: var(--wce-text); }
 .wcf-db__actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.wcf-db__progress { font-size: 11.5px; color: var(--wce-faint); max-width: 460px; overflow-wrap: anywhere; }
+.wcf-db__hint { font-size: 11.5px; color: var(--wce-faint); }
 .wcf-db__cols { display: flex; flex-wrap: wrap; gap: 4px; }
 .wcf-db__cols code { padding: 0 5px; border-radius: 4px; background: var(--wce-accent-soft); color: var(--wce-accent-text); font: 600 11px "JetBrains Mono", Consolas, monospace; overflow-wrap: anywhere; }
 .wcf-db__op { padding: 1px 7px; border-radius: 999px; font: 800 10px Inter, system-ui, sans-serif; background: var(--wce-accent-soft); color: var(--wce-accent-text); }

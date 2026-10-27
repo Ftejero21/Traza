@@ -64,6 +64,19 @@
         "inputs": { "type": "object" }
       }
     },
+    "UiMockBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["html", "state", "mark", "caption"],
+      "properties": {
+        "html": { "type": "string", "minLength": 1, "maxLength": 40000 },
+        "css": { "type": "string", "maxLength": 30000 },
+        "root": { "type": "string", "maxLength": 120 },
+        "state": { "$ref": "#/$defs/UiPreviewState" },
+        "mark": { "$ref": "#/$defs/UiPlanMark" },
+        "caption": { "type": "string", "minLength": 1, "maxLength": 140 }
+      }
+    },
     "UiPreviewPlanBody": {
       "type": "object",
       "additionalProperties": false,
@@ -204,6 +217,22 @@
       "inject": { "$ref": "#/$defs/UiPlanInject" },
       "caption": { "type": "string", "minLength": 1, "maxLength": 140 },
       "after": { "$ref": "#/$defs/UiPreviewPlanBody" }
+    }
+  },
+
+  "UiMock": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["html", "css", "state", "mark", "caption"],
+    "properties": {
+      "html": { "type": "string", "minLength": 1, "maxLength": 40000 },
+      "css": { "type": "string", "maxLength": 30000 },
+      "root": { "type": "string", "maxLength": 120 },
+      "view": { "type": "string", "maxLength": 300 },
+      "state": { "$ref": "#/$defs/UiPreviewState" },
+      "mark": { "$ref": "#/$defs/UiPlanMark" },
+      "caption": { "type": "string", "minLength": 1, "maxLength": 140 },
+      "after": { "$ref": "#/$defs/UiMockBody" }
     }
   },
 

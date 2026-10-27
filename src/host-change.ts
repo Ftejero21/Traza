@@ -18,6 +18,8 @@ export interface ChangeRunOptions {
   useActiveEditor: boolean;
   token: vscode.CancellationToken;
   progress?: (m: string) => void;
+  /** Guarda en memoria la conversación de la propuesta para que el chat redacte su explicación (solo `@traza`). */
+  explain?: boolean;
 }
 
 export type ChangeRunResult =
@@ -108,6 +110,7 @@ export async function runChangeRequest(context: vscode.ExtensionContext, ai: Hos
       pinned: opts.pinned,
       token: opts.token,
       ...(opts.progress ? { progress: opts.progress } : {}),
+      ...(opts.explain === true ? { keepAnswerSeed: true } : {}),
     });
   } catch (error: unknown) {
     // El flujo generado no se pierde si la propuesta falla (salvo cancelación).

@@ -8,7 +8,7 @@ function plainState(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-const HOST_TYPES = new Set(['init', 'config', 'openFlow', 'response', 'filesChanged', 'fileSaved']);
+const HOST_TYPES = new Set(['init', 'config', 'openFlow', 'response', 'filesChanged', 'fileSaved', 'progress']);
 
 function isHostMessage(data: unknown): data is HostToWebview {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
@@ -17,6 +17,10 @@ function isHostMessage(data: unknown): data is HostToWebview {
   if (type === 'response') {
     const r = data as { id?: unknown; ok?: unknown };
     return typeof r.id === 'string' && typeof r.ok === 'boolean';
+  }
+  if (type === 'progress') {
+    const p = data as { id?: unknown; message?: unknown };
+    return typeof p.id === 'string' && typeof p.message === 'string';
   }
   return true;
 }
@@ -40,6 +44,10 @@ export class VsCodeBridge extends NexoBridge {
         this.pending.delete(data.id);
         if (data.ok) entry.resolve(data.result);
         else entry.reject(new Error(data.error));
+        return;
+      }
+      if (data.type === 'progress') {
+        this.progress$.next({ id: data.id, message: data.message.slice(0, 200) });
         return;
       }
       this.subject.next(data);

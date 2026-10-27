@@ -248,7 +248,7 @@ export class FlowPanel {
           result = await readMountFile(req.mountId, req.path, req.as, req.maxBytes);
           break;
         case 'flow':
-          result = await this.ai.flowRequest(id, req.kind, req.body);
+          result = await this.ai.flowRequest(id, req.kind, req.body, (message) => this.post({ type: 'progress', id, message }));
           break;
         case 'copy':
           await vscode.env.clipboard.writeText(req.text);

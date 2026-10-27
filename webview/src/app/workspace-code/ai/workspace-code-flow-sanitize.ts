@@ -25,6 +25,8 @@ import {
   ResultKind,
   SimulationPreset,
   SimulationResult,
+  UiMock,
+  UiMockBody,
   UiPreviewPlan,
   UiPreviewState,
 } from './nexo-ia.types';
@@ -388,6 +390,59 @@ export function sanitizeUiPreviewPlan(raw: unknown): UiPreviewPlan | null {
     plan.after = after;
   }
   return plan;
+}
+
+const UI_MOCK_HTML_MAX = 40_000;
+const UI_MOCK_CSS_MAX = 30_000;
+
+/** Texto corto de la maqueta: el '<' se neutraliza (solo se pinta como texto). */
+function mockLabel(value: unknown, max: number): string | null {
+  const text = boundedText(value, max);
+  return text === null ? null : text.replace(/</g, '‹');
+}
+
+function sanitizeMockBody(o: Obj): UiMockBody | null {
+  const html = boundedText(o['html'], UI_MOCK_HTML_MAX);
+  const state = oneOf(o['state'], UI_STATES);
+  const caption = mockLabel(o['caption'], 140);
+  const markObj = obj(o['mark']);
+  const markSelector = markObj ? boundedText(markObj['selector'], 120, true) : null;
+  const markLabel = markObj ? mockLabel(markObj['label'], 40) : null;
+  if (!html || !state || !caption || !markSelector || !markLabel) return null;
+  const body: UiMockBody = { html, state, mark: { selector: markSelector, label: markLabel }, caption };
+  if (o['css'] !== undefined && o['css'] !== null) {
+    if (typeof o['css'] !== 'string' || o['css'].length > UI_MOCK_CSS_MAX) return null;
+    body.css = o['css'];
+  }
+  if (o['root'] !== undefined && o['root'] !== null) {
+    if (typeof o['root'] !== 'string' || o['root'].length > 120 || o['root'].includes('<')) return null;
+    if (o['root'].trim()) body.root = o['root'].trim();
+  }
+  return body;
+}
+
+/**
+ * `UiMock` devuelto por la IA (HTML + CSS que NO son de fiar: se sanean después, al pintar). Estricto: `null` si la
+ * forma no es válida. Aquí solo se comprueban tipos y longitudes.
+ */
+export function sanitizeUiMock(raw: unknown): UiMock | null {
+  const o = obj(raw);
+  if (!o) return null;
+  const body = sanitizeMockBody(o);
+  if (!body) return null;
+  const mock: UiMock = { ...body, css: body.css ?? '' };
+  if (o['view'] !== undefined && o['view'] !== null) {
+    if (typeof o['view'] !== 'string' || o['view'].length > 300) return null;
+    if (o['view'].trim()) mock.view = o['view'].trim();
+  }
+  if (o['after'] !== undefined && o['after'] !== null) {
+    const a = obj(o['after']);
+    if (!a) return null;
+    const after = sanitizeMockBody(a);
+    if (!after) return null;
+    mock.after = after;
+  }
+  return mock;
 }
 
 function sanitizeBase(o: Obj, stepIds: Set<string>): FlowDiagnosis {

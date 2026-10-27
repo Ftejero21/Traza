@@ -11,10 +11,11 @@ import { isCancelled, type HostAi } from './host-ai';
 import type { PinnedRef } from './host-context';
 import {
   escapeMarkdown, failLocation, formatChangeChatMarkdown, formatFlowChatMarkdown, isChangeRequest, isScenarioQuestion, isSpanish,
-  oneLine, resolveFlowFolder,
+  modelMarkdownWriter, oneLine, resolveFlowFolder,
 } from './host-flow-summary';
 
 const FLOW_ID = /^[0-9a-f-]{36}$/i;
+const SEPARATOR = '\n\n---\n\n';
 
 function referencesOf(request: vscode.ChatRequest): PinnedRef[] {
   const out: PinnedRef[] = [];
@@ -28,6 +29,32 @@ function referencesOf(request: vscode.ChatRequest): PinnedRef[] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message.slice(0, 500) : (isSpanish() ? 'Error inesperado.' : 'Unexpected error.');
+}
+
+/**
+ * Redacta en el chat, en streaming, la respuesta de la IA para el flujo o la propuesta `id` (saneada, siempre como string).
+ * Nunca lanza: un fallo se registra y se devuelve `answered: false`; la cancelación se indica en `cancelled`.
+ */
+async function streamAnswerToChat(
+  ai: HostAi, id: string, request: vscode.ChatRequest, stream: vscode.ChatResponseStream, token: vscode.CancellationToken, progress: string,
+): Promise<{ answered: boolean; cancelled: boolean; chars: number }> {
+  if (!id) return { answered: false, cancelled: false, chars: 0 };
+  stream.progress(progress);
+  const writer = modelMarkdownWriter((md) => stream.markdown(md));
+  let ok = false;
+  try {
+    ok = (await ai.streamAnswer({
+      id, model: request.model, token, onText: (chunk) => writer.push(chunk), progress: (message) => stream.progress(message),
+    })).ok;
+  } catch (error: unknown) {
+    if (isCancelled(error) || token.isCancellationRequested) {
+      writer.end();
+      return { answered: false, cancelled: true, chars: 0 };
+    }
+    console.warn('[Traza] No se pudo redactar la respuesta.', error instanceof Error ? error.name : '');
+  }
+  const chars = writer.end();
+  return { answered: ok && chars > 0, cancelled: token.isCancellationRequested, chars };
 }
 
 export function registerChatParticipant(context: vscode.ExtensionContext, ai: HostAi): vscode.Disposable[] {
@@ -48,7 +75,7 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
         const result = await runChangeRequest(context, ai, {
           request: prompt, model: request.model, pinned: referencesOf(request), useActiveEditor: true, token,
           progress: (message) => stream.progress(message),
-          ...(changeFolder ? { folder: changeFolder.name } : {}),
+          ...(changeFolder ? { folder: changeFolder.name } : {}), explain: true,
         });
         const flowId = FLOW_ID.test(result.flowId) && ai.flowById(result.flowId) ? result.flowId : '';
         if (result.kind === 'answer') {
@@ -59,7 +86,13 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
           }
           return {};
         }
-        stream.markdown(formatChangeChatMarkdown(result));
+        const proposalId = typeof result.proposal['id'] === 'string' ? result.proposal['id'] : '';
+        const explanation = await streamAnswerToChat(
+          ai, FLOW_ID.test(proposalId) ? proposalId : '', request, stream, token,
+          es ? 'Redactando la explicación…' : 'Writing the explanation…',
+        );
+        if (explanation.cancelled) return {};
+        stream.markdown(`${explanation.chars > 0 ? SEPARATOR : ''}${formatChangeChatMarkdown(result)}`);
         if (flowId) {
           stream.button({ command: 'traza.showFlow', arguments: [{ flowId, mode: 'changes' }], title: es ? 'Ver cambios' : 'View changes' });
           stream.button({ command: 'traza.showFlow', arguments: [{ flowId }], title: es ? 'Visualizar flujo' : 'Visualize flow' });
@@ -75,13 +108,24 @@ export function registerChatParticipant(context: vscode.ExtensionContext, ai: Ho
       const generated = await ai.generateFlow({
         question: prompt, model: request.model, pinned: referencesOf(request), useActiveEditor: true, token,
         progress: (message) => stream.progress(message),
-        ...(folder ? { folder: folder.name } : {}), scenario,
+        ...(folder ? { folder: folder.name } : {}), scenario, keepAnswerSeed: true,
       });
       FlowPanel.showGenerated(context, ai, generated);
-      stream.markdown(formatFlowChatMarkdown(generated));
+      const flowId = typeof generated.flow['id'] === 'string' ? generated.flow['id'] : '';
+      const answer = await streamAnswerToChat(ai, flowId, request, stream, token, es ? 'Redactando la respuesta…' : 'Writing the answer…');
+      if (answer.cancelled) return {};
+      if (answer.answered) {
+        stream.markdown(`${SEPARATOR}${formatFlowChatMarkdown(generated, { compact: true })}`);
+      } else {
+        stream.markdown(`${answer.chars > 0 ? SEPARATOR : ''}${formatFlowChatMarkdown(generated)}`);
+        if (flowId) {
+          stream.markdown(es
+            ? '\n\nNo se pudo redactar la respuesta completa; el flujo está disponible en el panel\\.'
+            : '\n\nThe full answer could not be written; the flow is available in the panel\\.');
+        }
+      }
       const location = failLocation(generated);
       if (location) stream.anchor(location, es ? 'Ver dónde falla' : 'See where it fails');
-      const flowId = typeof generated.flow['id'] === 'string' ? generated.flow['id'] : '';
       stream.button({
         command: 'traza.showFlow', arguments: flowId ? [{ flowId }] : [],
         title: es ? 'Visualizar flujo' : 'Visualize flow',
