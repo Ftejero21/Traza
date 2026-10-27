@@ -14,7 +14,9 @@
 
 ## Qué hace
 
-Escribe `@traza ¿cómo funciona el login?` y Traza lee el código relevante de tu proyecto, sigue la petición de capa en capa (frontend → API → servicio → base de datos) y te abre un panel con el recorrido completo. Cada paso apunta a su `archivo:línea` real.
+Escribe `@traza ¿cómo funciona el login?` y el modelo que tengas elegido en el chat investiga tu proyecto por su cuenta: busca y lee (solo lectura) en todas las carpetas abiertas y sigue la petición de capa en capa (frontend → API → servicio → base de datos). Traza dibuja lo que devuelve en un panel con el recorrido completo, y cada paso apunta a su `archivo:línea`.
+
+**La IA piensa, Traza dibuja.** Traza no corrige ni filtra el contenido de la respuesta. Solo vuelve a pedírsela si viene con un formato que no se puede dibujar.
 
 | | |
 |---|---|
@@ -39,9 +41,9 @@ Todo funciona **sin servidor propio**: la IA es el modelo que tengas configurado
    @traza ¿cómo funciona el login?
    ```
 
-4. La primera vez, elige el modelo y acepta el permiso de VS Code. Se abre el panel **Flujo · …**.
+4. La primera vez, acepta el permiso de VS Code. Mientras la IA investiga, el chat muestra qué está buscando y leyendo. Al terminar se abre el panel **Flujo · …**.
 
-> 💡 Para cambiar de modelo: **Traza: Elegir modelo** en la paleta de comandos.
+> 💡 Con `@traza` se usa el modelo elegido en el selector del chat, y las acciones del panel (simular, logs, base de datos) usan ese mismo modelo. **Traza: Elegir modelo** solo se usa para los comandos y los enlaces.
 
 ---
 
@@ -82,7 +84,7 @@ Pega los logs del navegador o del servidor y pulsa **Analizar logs**. Traza cruz
 
 <p align="center"><img src="https://raw.githubusercontent.com/Ftejero21/Traza/main/media/base-de-datos.webp" alt="Mapa de datos: SELECT y UPDATE sobre la tabla usuario" width="900"></p>
 
-El diagrama de tablas se recorre al ritmo del flujo. En cada acceso ves la operación (`SELECT`, `UPDATE`…), las columnas y de dónde sale cada valor (`email ← usuarioDTO.email`). Sin conexión se deduce del código. Con una conexión configurada se usa **el esquema real**, del que solo se lee la metadata.
+Si el flujo toca la base de datos, esta pestaña se prepara sola en segundo plano en cuanto se abre el flujo, así que al entrar ya está dibujada. También se reutiliza al reabrir el flujo. El diagrama de tablas se recorre al ritmo del flujo. En cada acceso ves la operación (`SELECT`, `UPDATE`…), las columnas y de dónde sale cada valor (`email ← usuarioDTO.email`), con la explicación del paso junto a su tabla. Sin conexión, se deduce de las entidades y del código. Con una conexión configurada se usa **el esquema real**, del que solo se lee la metadata.
 
 ### 🔀 Simular cambios
 
@@ -155,7 +157,7 @@ Traza es el nuevo nombre de la extensión «Nexo Flujo» (id `ftejero21.traza`).
 ## Requisitos
 
 - **VS Code 1.95 o superior.** Traza se publica como **Preview**.
-- **Un modelo de lenguaje en VS Code** (p. ej. GitHub Copilot) con Claude, GPT o BYOK. Se guarda en el ajuste `traza.model`; si está vacío, se elige al usarlo.
+- **Un modelo de lenguaje en VS Code** (p. ej. GitHub Copilot) con Claude, GPT o BYOK. Con `@traza` se usa el del selector del chat; los comandos y enlaces usan el ajuste `traza.model` (si está vacío, se elige al usarlo). Para que la IA investigue por su cuenta, el modelo tiene que admitir herramientas; si no las admite, Traza le pasa directamente el código relevante.
 - **Una carpeta del proyecto abierta.**
 
 ---
@@ -164,7 +166,7 @@ Traza es el nuevo nombre de la extensión «Nexo Flujo» (id `ftejero21.traza`).
 
 En cada operación, el código relevante se envía **al proveedor del modelo que elijas**, a través de VS Code.
 
-**Se envía:** rutas de archivos, fragmentos de código relevantes, el archivo activo y la selección, el flujo, los datos de entrada, los logs que pegues y la metadata de la base de datos.
+**Se envía:** rutas de archivos, fragmentos de código relevantes, los archivos que la IA pida buscar o leer mientras investiga (de las carpetas abiertas y con las mismas exclusiones), el archivo activo y la selección, el flujo, los datos de entrada, los logs que pegues y la metadata de la base de datos.
 
 **No se envía nunca:**
 
@@ -179,7 +181,14 @@ Además:
 
 ## Consumo
 
-Cada operación hace una o dos llamadas al modelo, más un reintento si la respuesta no es válida. **Simular cambios** hace dos llamadas por escenario (hasta 14). Esto consume cuota o *premium requests* de tu proveedor. Las respuestas se guardan en caché 15 minutos.
+Esto consume cuota o *premium requests* de tu proveedor:
+
+- **Generar un flujo o proponer un cambio:** la IA investiga en varias rondas (como máximo unas 14 rondas, 40 búsquedas y lecturas, o 2 minutos y medio).
+- **Respuesta con un formato que no se puede dibujar:** se vuelve a pedir hasta 2 veces más.
+- **Flujo que toca la base de datos:** una llamada más para precargar esa pestaña.
+- **Simular cambios:** dos llamadas por escenario (hasta 14).
+
+Las respuestas se guardan en caché 15 minutos.
 
 ## Formato del JSON de flujo
 
