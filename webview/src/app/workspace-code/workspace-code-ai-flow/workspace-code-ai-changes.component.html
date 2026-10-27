@@ -75,15 +75,25 @@
 
       <div class="wcx__empty" *ngIf="!flowService.ui.changeBusy && !comparison">
         <i class="bi bi-arrow-left-right" aria-hidden="true"></i>
-        <button type="button" class="wcx__play" [disabled]="!canRun('ai.simulateChange')" (click)="run('ai.simulateChange', $event)">
-          <i class="bi bi-play-fill" aria-hidden="true"></i>{{ 'aiChange.simulate' | wcT }}
-        </button>
+        <div class="wcx__toolbar">
+          <button type="button" class="wcx__play" [disabled]="!canRun('ai.simulateChange')" (click)="run('ai.simulateChange', $event)">
+            <i class="bi bi-play-fill" aria-hidden="true"></i>{{ 'aiChange.simulate' | wcT }}
+          </button>
+          <button type="button" class="wcx__btn" *ngIf="preview.screenStep >= 0" [title]="'aiChange.visualizeHint' | wcT" (click)="openPreview('after', $event)">
+            <i class="bi bi-display" aria-hidden="true"></i>{{ 'aiFlow.stepMenu.visualize' | wcT }}
+          </button>
+        </div>
       </div>
 
       <ng-container *ngIf="!flowService.ui.changeBusy && comparison as cmp">
-        <button type="button" class="wcx__play" [disabled]="!current" (click)="flowService.playBeforeAfter()">
-          <i class="bi bi-play-fill" aria-hidden="true"></i>{{ 'aiChange.playBoth' | wcT }}
-        </button>
+        <div class="wcx__toolbar">
+          <button type="button" class="wcx__play" [disabled]="!current" (click)="flowService.playBeforeAfter()">
+            <i class="bi bi-play-fill" aria-hidden="true"></i>{{ 'aiChange.playBoth' | wcT }}
+          </button>
+          <button type="button" class="wcx__btn" *ngIf="preview.screenStep >= 0" [title]="'aiChange.visualizeHint' | wcT" (click)="openPreview(side === 'after' ? 'after' : 'now', $event)">
+            <i class="bi bi-display" aria-hidden="true"></i>{{ 'aiFlow.stepMenu.visualize' | wcT }}
+          </button>
+        </div>
 
         <div class="wcx__chips">
           <span class="wcx__chip" *ngFor="let tag of tags" [attr.data-tag]="tag">{{ ('aiChange.count.' + tag) | wcT: { n: count(tag) } }}</span>

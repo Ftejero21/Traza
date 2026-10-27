@@ -259,6 +259,10 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
   /** Paso del Recorrido cuya pantalla se previsualiza (-1 = ninguno). */
   private walkScreenStep = -1;
   private walkScreenCtx: { flowId: string; index: number; ctx: UiScreenContext } | null = null;
+  /** Contexto sintético de Simular cambios sin caso elegido (identidad estable mientras no cambie el flujo/propuesta/ancla). */
+  private changeScreenCtx: { flowId: string; proposalId: string; status: string; anchor: number; ctx: UiScreenContext } | null = null;
+  /** Paso de pantalla que corresponde al componente del diff de cada propuesta. */
+  private changeStepCache = new WeakMap<ChangeProposal, { flowId: string; index: number }>();
   /** Pasos visibles de cada flujo (se calcula una vez por objeto de flujo). */
   private screenSteps = new WeakMap<FlowDiagram, Set<number>>();
 
@@ -350,6 +354,7 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       this.dbView = null;
       this.walkScreenStep = -1;
       this.walkScreenCtx = null;
+      this.changeScreenCtx = null;
     }
     const keep = sameFlow ? this.ui : null;
     this.ui = {
@@ -514,6 +519,87 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
       input: maskSensitiveJson(flow.inputExample),
     };
     this.walkScreenCtx = { flowId: flow.id, index, ctx };
+    return ctx;
+  }
+
+  /**
+   * Índice del paso del flujo cuya referencia pertenece al mismo componente (plantilla, estilos o .ts) que algún archivo
+   * del diff, o -1. Prefiere un paso visible para el usuario.
+   */
+  changeScreenStep(proposal: ChangeProposal): number {
+    const flow = this.flow;
+    if (!flow) return -1;
+    const cached = this.changeStepCache.get(proposal);
+    if (cached && cached.flowId === flow.id) return cached.index;
+    const stem = (path: string): string => path.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '').replace(/^\/+/, '').toLowerCase().replace(/\.[^./]+$/, '');
+    const diff = proposal.files
+      .filter((f) => f.status !== 'deleted' && !!f.path)
+      .map((f) => ({ mountId: String(f.mountId ?? ''), stem: stem(f.path) }))
+      .filter((f) => !!f.stem);
+    const sameComponent = (ref: CodeRef | null | undefined): boolean => {
+      if (!ref || !ref.file) return false;
+      const refStem = stem(ref.file);
+      if (!refStem) return false;
+      const refMount = String(ref.mountId ?? '');
+      return diff.some((d) => {
+        if (refMount && d.mountId && refMount !== d.mountId) return false;
+        return d.stem === refStem || d.stem.endsWith('/' + refStem) || refStem.endsWith('/' + d.stem);
+      });
+    };
+    let first = -1;
+    let screen = -1;
+    for (let i = 0; i < flow.steps.length; i++) {
+      const step = flow.steps[i];
+      if (!sameComponent(step.ref) && !sameComponent(step.snippet?.ref)) continue;
+      if (first < 0) first = i;
+      if (this.isScreenStep(i)) { screen = i; break; }
+    }
+    const index = screen >= 0 ? screen : first;
+    this.changeStepCache.set(proposal, { flowId: flow.id, index });
+    return index;
+  }
+
+  /** Contexto sintético de Simular cambios cuando aún no hay caso (ni comparación): permite «Visualizar pantalla». */
+  private changeScreenContext(): UiScreenContext | null {
+    const flow = this.flow;
+    const proposal = this.activeChange?.proposal;
+    if (!flow || !proposal || !flow.steps.length) return null;
+    const matched = this.changeScreenStep(proposal);
+    let anchor = matched;
+    if (anchor < 0) {
+      anchor = flow.steps.findIndex((_, i) => this.isScreenStep(i));
+      if (anchor < 0) anchor = flow.steps.length - 1;
+    }
+    const cached = this.changeScreenCtx;
+    if (cached && cached.flowId === flow.id && cached.proposalId === proposal.id && cached.status === proposal.status && cached.anchor === anchor) return cached.ctx;
+    const before: SimulationResult = {
+      kind: 'ok',
+      failStepId: null,
+      badge: '',
+      title: proposal.title,
+      where: flow.steps[anchor]?.ref ?? null,
+      conclusion: proposal.summary,
+      userImpact: proposal.summary,
+      fix: '',
+      snippet: null,
+      confidence: 'media',
+      confidenceReason: '',
+      executedStepIds: flow.steps.slice(0, anchor + 1).map((s) => s.id),
+      skippedStepIds: [],
+    };
+    const ctx: UiScreenContext = {
+      key: before,
+      mode: 'changes',
+      flowId: flow.id,
+      anchor,
+      tone: 'accent',
+      before,
+      afterResult: null,
+      proposal,
+      initialTab: 'after',
+      input: maskSensitiveJson(flow.inputExample),
+    };
+    this.changeScreenCtx = { flowId: flow.id, proposalId: proposal.id, status: proposal.status, anchor, ctx };
     return ctx;
   }
 
@@ -1494,6 +1580,28 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     const ui = this.ui;
     const flow = this.flow;
     if (flow && ui.mode === 'walk') return this.walkScreenContext();
+    if (flow && ui.mode === 'changes') {
+      if (ui.changeBusy) return null;
+      const current = this.currentCase;
+      if (!current) return this.changeScreenContext();
+      const proposal = this.activeChange?.proposal ?? null;
+      const result = current[ui.changeSide];
+      const matched = proposal ? this.changeScreenStep(proposal) : -1;
+      const anchor = this.targetOf(result, 'sim') ?? (matched >= 0 ? matched : flow.steps.length - 1);
+      const kind = result.kind;
+      return {
+        key: current,
+        mode: 'changes',
+        flowId: flow.id,
+        anchor,
+        tone: kind === 'stop' ? 'warning' : kind === 'error' ? 'danger' : kind === 'ok' ? 'success' : 'accent',
+        before: current.before,
+        afterResult: current.after ?? null,
+        proposal,
+        initialTab: ui.changeSide === 'after' ? 'after' : 'now',
+        input: maskSensitiveJson(this.presetInput(current.preset)),
+      };
+    }
     if (!flow || ui.mode === 'db' || !ui.resultVisible) return null;
     const result = this.result;
     if (!result) return null;
@@ -1501,22 +1609,6 @@ export class WorkspaceCodeAiFlowService implements OnDestroy {
     if (anchor === null) return null;
     const kind = result.kind;
     const tone = kind === 'stop' ? 'warning' : kind === 'error' ? 'danger' : kind === 'ok' ? 'success' : 'accent';
-    if (ui.mode === 'changes') {
-      const current = this.currentCase;
-      if (!current) return null;
-      return {
-        key: current,
-        mode: 'changes',
-        flowId: flow.id,
-        anchor,
-        tone,
-        before: current.before,
-        afterResult: current.after ?? null,
-        proposal: this.activeChange?.proposal ?? null,
-        initialTab: ui.changeSide === 'after' ? 'after' : 'now',
-        input: maskSensitiveJson(this.presetInput(current.preset)),
-      };
-    }
     let input: unknown = null;
     if (ui.mode === 'sim') {
       try {

@@ -195,6 +195,7 @@ export const WORKSPACE_CODE_I18N_ES: Record<string, string> = {
   'aiChange.openDiff': 'Abrir diff',
   'aiChange.permission': 'Traza necesita tu permiso para modificar {n} archivos',
   'aiChange.playBoth': 'Simular antes y después',
+  'aiChange.visualizeHint': 'Ver la pantalla Ahora y Con el cambio',
   'aiChange.regenerate': 'Regenerar propuesta',
   'aiChange.regressionConfirm.confirm': 'Aplicar de todos modos',
   'aiChange.regressionConfirm.message': 'Según la simulación, estos casos funcionaban y dejan de hacerlo con el cambio: {cases}. ¿Aplicar de todos modos?',

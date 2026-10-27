@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.4 (Preview)
+
+- «Simular cambios»: botón «Visualizar pantalla» junto a «Simular antes y después», también antes de comparar. Abre la pantalla del componente que toca el cambio, con las pestañas «Ahora» y «Con el cambio».
+- «Simular cambios»: la tabla de resultados ya no se aplasta cuando la vista tiene altura fija o un solo caso.
+
 ## 0.1.3 (Preview)
 
 - «Base de datos» → «Reintentar»: si el flujo trae la SQL que generó la IA, se envía como punto de partida y se contrasta con el código, que es el que manda. Si no la trae, la IA la busca leyendo la clase o función del paso de datos y la del paso anterior.

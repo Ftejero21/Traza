@@ -829,6 +829,20 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     try {
       const isAllowed = await this.project.fileFilter();
       const validator = new FlowRefValidator(this.project, isAllowed);
+      // Simular cambios: primero el componente de los archivos de vista del diff.
+      if (ctx.mode === 'changes' && ctx.proposal) {
+        for (const ref of this.changeViewRefs(ctx.proposal)) {
+          const target = await this.componentForRef(ref, validator, isAllowed);
+          if (run !== this.resolveRun) return;
+          if (!target) continue;
+          this.target = target;
+          this.screenStep = this.changeStepFor(ctx);
+          this.componentName = target.meta.className;
+          this.refLine = this.refLineOf(target);
+          this.changed$.next();
+          return;
+        }
+      }
       // Primero las referencias verificadas; si ninguna da componente, las no verificadas (la línea puede no casar,
       // pero el archivo sí existe y `componentForRef` lo valida igual).
       for (const verified of [true, false]) {
@@ -854,7 +868,7 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     // Sin componente Angular: la IA maqueta la vista del paso (JSP, Thymeleaf, JSX, Vue, Razor, PHP…).
     const mock = this.mockTarget;
     if (!this.target && mock && run === this.resolveRun) {
-      this.screenStep = ctx.anchor;
+      this.screenStep = ctx.mode === 'changes' ? this.changeStepFor(ctx) : ctx.anchor;
       this.componentName = mock.name;
       this.refLine = mock.refLine;
       this.changed$.next();
@@ -879,9 +893,13 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
     const order: number[] = [];
     for (let i = anchor; i >= 0; i--) order.push(i);
     for (let i = anchor + 1; i <= last; i++) order.push(i);
-    const stepIndex = order.find((i) => this.flowService.isScreenStep(i) || refsOf(i).some(isView));
+    const p = ctx.mode === 'changes' ? ctx.proposal : null;
+    const diffViews = p ? this.changeViewRefs(p).filter(isView) : [];
+    const diffStep = p ? this.flowService.changeScreenStep(p) : -1;
+    let stepIndex = diffStep >= 0 ? diffStep : order.find((i) => this.flowService.isScreenStep(i) || refsOf(i).some(isView));
+    if (stepIndex === undefined && diffViews.length) stepIndex = anchor;
     if (stepIndex === undefined) return null;
-    const refs: CodeRef[] = [...refsOf(stepIndex)];
+    const refs: CodeRef[] = [...diffViews, ...refsOf(stepIndex)];
     if (anchor !== stepIndex) refs.push(...refsOf(anchor));
     if (stepIndex > 0) refs.push(...refsOf(stepIndex - 1));
     const seen = new Set<string>();
@@ -903,6 +921,43 @@ export class WorkspaceCodeAiUiPreviewService implements OnDestroy {
       name: viewRef ? basename(viewRef.file) : label,
       refLine: viewRef ? basename(viewRef.file) : seeds[0] ? basename(seeds[0].file) : '',
     };
+  }
+
+  /** Paso de pantalla de Simular cambios: el del componente del diff o, si no hay, el ancla acotada. */
+  private changeStepFor(ctx: UiScreenContext): number {
+    const flow = this.flowService.flow;
+    const matched = ctx.proposal ? this.flowService.changeScreenStep(ctx.proposal) : -1;
+    if (matched >= 0) return matched;
+    const last = Math.max(0, (flow?.steps.length ?? 1) - 1);
+    return Math.min(Math.max(ctx.anchor, 0), last);
+  }
+
+  /**
+   * Referencias sintéticas a los archivos de vista del diff (plantillas, estilos y .ts), solo con rutas seguras. Se
+   * resuelven después con `FlowRefValidator`, que aplica `fileFilter` y `isSensitiveCodeFile`.
+   */
+  private changeViewRefs(proposal: ChangeProposal): CodeRef[] {
+    const files = proposal.files.filter((f) => f.status !== 'deleted' && !!f.path && f.path.length <= 400 && !!safeRelativePath(f.path) && String(f.mountId ?? '').length <= 200);
+    const rank = (path: string): number => {
+      if (VIEW_TEMPLATE_RE.test(path)) return 0;
+      if (/\.(?:css|scss|sass|less)$/i.test(path)) return 1;
+      if (/\.ts$/i.test(path) && !/\.spec\.ts$/i.test(path)) return 2;
+      return -1;
+    };
+    return files
+      .map((f) => ({ f, r: rank(f.path) }))
+      .filter((x) => x.r >= 0)
+      .sort((a, b) => a.r - b.r)
+      .slice(0, 6)
+      .map(({ f }) => ({
+        mountId: String(f.mountId ?? ''),
+        file: f.path,
+        line: Math.max(1, f.hunks[0]?.newStart || 1),
+        anchor: '',
+        className: '',
+        functionName: '',
+        verification: 'unverified' as const,
+      }));
   }
 
   private refLineOf(target: ScreenTarget): string {

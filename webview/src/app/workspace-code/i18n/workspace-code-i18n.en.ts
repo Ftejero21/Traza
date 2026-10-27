@@ -195,6 +195,7 @@ export const WORKSPACE_CODE_I18N_EN: Record<string, string> = {
   'aiChange.openDiff': 'Open diff',
   'aiChange.permission': 'Traza needs your permission to modify {n} files',
   'aiChange.playBoth': 'Simulate before and after',
+  'aiChange.visualizeHint': 'See the screen now and with the change',
   'aiChange.regenerate': 'Regenerate proposal',
   'aiChange.regressionConfirm.confirm': 'Apply anyway',
   'aiChange.regressionConfirm.message': 'According to the simulation, these cases worked and stop working with the change: {cases}. Apply anyway?',
